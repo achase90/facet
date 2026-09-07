@@ -727,6 +727,191 @@ class TestSelectBottomPercent:
         assert set(data["paths"]) == {"/p0.jpg", "/p1.jpg", "/p2.jpg"}
 
 
+class _WholeViewEndpoint:
+    """Shared driver for the two whole-view selection endpoints.
+
+    Both answer for the WHOLE filter set rather than the page the client has
+    scrolled to, from the same ``_prepare_gallery_params`` +
+    ``_build_gallery_where`` pair the grid itself uses, so they are exercised
+    against the same mock stack as ``TestSelectBottomPercent``.
+    """
+
+    endpoint = ''
+
+    def _get(self, db_path, query):
+        app = _create_app_no_auth()
+        with (
+            mock.patch("api.routers.gallery.get_db", _conn_factory(db_path)),
+            mock.patch("api.routers.gallery.get_async_db", _async_conn_factory(db_path)),
+            mock.patch("api.routers.gallery.VIEWER_CONFIG", _VIEWER_CONFIG),
+            mock.patch("api.db_helpers._existing_columns_cache", _existing_columns(db_path)),
+            mock.patch.dict("api.config._count_cache", {}, clear=True),
+        ):
+            return TestClient(app).get(f"{self.endpoint}?{query}")
+
+    def _grid_paths(self, db_path, query):
+        """What GET /api/photos shows for the same query, for agreement checks."""
+        app = _create_app_no_auth()
+        with (
+            mock.patch("api.routers.gallery.get_db", _conn_factory(db_path)),
+            mock.patch("api.routers.gallery.get_async_db", _async_conn_factory(db_path)),
+            mock.patch("api.routers.gallery.VIEWER_CONFIG", _VIEWER_CONFIG),
+            mock.patch("api.db_helpers._existing_columns_cache", _existing_columns(db_path)),
+            mock.patch.dict("api.config._count_cache", {}, clear=True),
+        ):
+            resp = TestClient(app).get(f"/api/photos?per_page=200&{query}")
+        assert resp.status_code == 200, resp.text
+        return {p["path"] for p in resp.json()["photos"]}
+
+    def _album_db(self, tmp_path):
+        """Ten photos, three of them in album 1."""
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [
+            _photo(f"/p{i}.jpg", "2024:01:01 10:00:00", aggregate=float(i))
+            for i in range(10)
+        ])
+        conn = sqlite3.connect(db_path)
+        conn.execute("INSERT INTO albums (id, user_id, name) VALUES (1, NULL, 'trip')")
+        conn.executemany(
+            "INSERT INTO album_photos (album_id, photo_path) VALUES (1, ?)",
+            [("/p0.jpg",), ("/p4.jpg",), ("/p9.jpg",)],
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+
+class TestPhotoCount(_WholeViewEndpoint):
+    """GET /api/photos/count — the size of the current view, not of a page."""
+
+    endpoint = "/api/photos/count"
+
+    def test_paging_does_not_narrow_the_count(self, tmp_path):
+        """Issue #126: the client's 'select all' only ever saw fetched pages.
+
+        A one-row page must still report the whole view, or the count driving
+        'select all N' is just the count of what has been scrolled past.
+        """
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [
+            _photo(f"/p{i}.jpg", "2024:01:01 10:00:00", aggregate=float(i))
+            for i in range(10)
+        ])
+        resp = self._get(db_path, "page=2&per_page=1")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"total": 10}
+
+    def test_active_filters_are_honoured(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [
+            _photo("/c1.jpg", "2024:01:01 10:00:00", camera_model="Canon R6"),
+            _photo("/c2.jpg", "2024:01:01 10:00:00", camera_model="Canon R6"),
+            _photo("/n1.jpg", "2024:01:01 10:00:00", camera_model="Nikon Z6"),
+        ])
+        assert self._get(db_path, "camera=Canon+R6").json() == {"total": 2}
+
+    def test_the_hide_toggles_are_honoured(self, tmp_path):
+        """The count must agree with the grid about what 'the view' contains.
+
+        Same fixture as ``TestGalleryHidePanoramas``: four panorama frames
+        spread over two burst groups plus one ordinary photo. With both default
+        toggles on the grid shows two rows, so a count of five would offer to
+        select frames the user cannot see.
+        """
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, TestGalleryHidePanoramas._PHOTOS)
+        query = "hide_bursts=1&hide_panoramas=1"
+        assert self._get(db_path, query).json() == {"total": 2}
+        assert self._get(db_path, "").json() == {"total": 5}
+
+    def test_album_scope_is_honoured(self, tmp_path):
+        assert self._get(self._album_db(tmp_path), "album_id=1").json() == {"total": 3}
+
+    def test_an_unknown_album_is_404(self, tmp_path):
+        assert self._get(self._album_db(tmp_path), "album_id=99").status_code == 404
+
+    def test_an_empty_view_counts_zero(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [_photo("/a.jpg", "2024:01:01 10:00:00", camera_model="Canon R6")])
+        assert self._get(db_path, "camera=Pentax+K1").json() == {"total": 0}
+
+    def test_an_out_of_range_per_page_is_422(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [_photo("/a.jpg", "2024:01:01 10:00:00")])
+        assert self._get(db_path, "per_page=99999").status_code == 422
+
+
+class TestPhotoPaths(_WholeViewEndpoint):
+    """GET /api/photos/paths — every path in the current view, uncapped."""
+
+    endpoint = "/api/photos/paths"
+
+    def test_paging_does_not_narrow_the_path_set(self, tmp_path):
+        """Issue #126, the half that actually feeds the selection."""
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [
+            _photo(f"/p{i}.jpg", "2024:01:01 10:00:00", aggregate=float(i))
+            for i in range(10)
+        ])
+        data = self._get(db_path, "page=2&per_page=1").json()
+        assert data["total"] == 10
+        assert set(data["paths"]) == {f"/p{i}.jpg" for i in range(10)}
+
+    def test_total_is_the_length_of_paths(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [
+            _photo(f"/p{i}.jpg", "2024:01:01 10:00:00") for i in range(7)
+        ])
+        data = self._get(db_path, "").json()
+        assert data["total"] == len(data["paths"]) == 7
+
+    def test_active_filters_are_honoured(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [
+            _photo("/c1.jpg", "2024:01:01 10:00:00", camera_model="Canon R6"),
+            _photo("/c2.jpg", "2024:01:01 10:00:00", camera_model="Canon R6"),
+            _photo("/n1.jpg", "2024:01:01 10:00:00", camera_model="Nikon Z6"),
+        ])
+        data = self._get(db_path, "camera=Canon+R6").json()
+        assert set(data["paths"]) == {"/c1.jpg", "/c2.jpg"}
+
+    def test_the_hide_toggles_are_honoured(self, tmp_path):
+        """Byte-for-byte the same row set the grid renders for that query.
+
+        Asserted against ``/api/photos`` itself rather than a hand-written
+        expectation, because the point of the endpoint is that the two agree.
+        """
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, TestGalleryHidePanoramas._PHOTOS)
+        query = "hide_bursts=1&hide_panoramas=1"
+        data = self._get(db_path, query).json()
+        assert set(data["paths"]) == {"/plain.jpg", "/p-c.jpg"}
+        assert set(data["paths"]) == self._grid_paths(db_path, query)
+
+    def test_a_hidden_frame_appears_once_the_toggle_is_off(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, TestGalleryHidePanoramas._PHOTOS)
+        data = self._get(db_path, "").json()
+        assert set(data["paths"]) == {p["path"] for p in TestGalleryHidePanoramas._PHOTOS}
+
+    def test_album_scope_is_honoured(self, tmp_path):
+        data = self._get(self._album_db(tmp_path), "album_id=1").json()
+        assert set(data["paths"]) == {"/p0.jpg", "/p4.jpg", "/p9.jpg"}
+
+    def test_an_unknown_album_is_404(self, tmp_path):
+        assert self._get(self._album_db(tmp_path), "album_id=99").status_code == 404
+
+    def test_an_empty_view_returns_no_paths(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [_photo("/a.jpg", "2024:01:01 10:00:00", camera_model="Canon R6")])
+        assert self._get(db_path, "camera=Pentax+K1").json() == {"total": 0, "paths": []}
+
+    def test_an_out_of_range_per_page_is_422(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [_photo("/a.jpg", "2024:01:01 10:00:00")])
+        assert self._get(db_path, "per_page=99999").status_code == 422
+
+
 class TestGalleryHidePanoramas:
     """A panorama must survive both default hide toggles at once.
 

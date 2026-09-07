@@ -149,6 +149,31 @@ class PhotosResponse(PaginationEnvelope):
     hidden_summary: Optional[HiddenSummary] = None
 
 
+class PhotoCountResponse(BaseModel):
+    """How many rows the current gallery view holds, ignoring pagination.
+
+    What the client needs to render "select all N photos" without fetching a
+    single page of rows: the gallery paginates at
+    ``pagination.default_per_page``, so before this endpoint the only count the
+    client could act on was the one it had scrolled to.
+    """
+
+    total: int
+
+
+class PhotoPathsResponse(BaseModel):
+    """Every path in the current gallery view, in no particular order.
+
+    Uncapped and unsorted on purpose: the client turns it into a Set, so the
+    order carries no information and an ORDER BY would only cost a sort over
+    the whole view. ``total`` is ``len(paths)`` rather than a cached count, so
+    the two can never disagree.
+    """
+
+    total: int
+    paths: list[str]
+
+
 # --- Gallery query parameters ---
 
 class GalleryParams(BaseModel):

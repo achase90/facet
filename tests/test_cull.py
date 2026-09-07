@@ -340,6 +340,56 @@ class TestCullApplyFilterScope:
         assert resp.status_code == 200
         assert resp.json()["would_copy"] == [field]
 
+    def test_exclude_narrows_the_filter_set(self, client, tmp_path):
+        keep = _make_file(tmp_path, "keep.jpg")
+        drop = _make_file(tmp_path, "drop.jpg")
+        db = self._categorised_db(tmp_path, [(keep, "aerial"), (drop, "aerial")])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"type": "aerial"}, "exclude": [drop],
+                "action": "copy_keeps", "target_dir": str(tmp_path / "k"),
+                "dry_run": True,
+            })
+        assert resp.status_code == 200
+        assert resp.json()["would_copy"] == [keep]
+
+    def test_exclude_can_only_narrow_a_destructive_action(self, client, tmp_path):
+        rejected = _make_file(tmp_path, "r.jpg")
+        db = self._categorised_db(tmp_path, [(rejected, "aerial")])
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE photos SET is_rejected = 1")
+        conn.commit()
+        conn.close()
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"type": "aerial"}, "exclude": [rejected],
+                "action": "move_rejects", "target_dir": str(tmp_path / "k"),
+                "dry_run": False,
+            })
+        assert resp.status_code == 200
+        assert resp.json()["moved"] == 0
+        assert os.path.isfile(rejected)
+
+    def test_a_malformed_filter_set_is_422_not_500(self, client, tmp_path):
+        photo = _make_file(tmp_path, "a.jpg")
+        db = self._categorised_db(tmp_path, [(photo, "aerial")])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"per_page": "99999"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 422
+
+
 class TestCullApplySequences:
     def test_copy_keeps_bracket_siblings_reported_and_included_when_flag_on(self, client, tmp_path):
         """A5#1: a 5-frame bracket contributes ONE selected path (the gallery

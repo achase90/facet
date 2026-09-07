@@ -2864,6 +2864,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/photos/count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Photos Count
+         * @description How many photos the current gallery view holds, across every page.
+         *
+         *     The gallery paginates at ``pagination.default_per_page`` with infinite
+         *     scroll, so "select all" could only ever mean "select what has been
+         *     fetched". This answers for the whole view from the same filters the grid
+         *     renders, so the client can hold a virtual whole-view selection instead of a
+         *     path list.
+         */
+        get: operations["api_photos_count_api_photos_count_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/photos/keeper_hints": {
         parameters: {
             query?: never;
@@ -2948,6 +2974,32 @@ export interface paths {
          * @description Return count of photos with GPS data, for nav badge visibility.
          */
         get: operations["api_photos_map_count_api_photos_map_count_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/photos/paths": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Photos Paths
+         * @description Every path in the current gallery view, for a whole-view selection.
+         *
+         *     Uncapped and unordered: the client builds a Set from these, so an ORDER BY
+         *     would sort the entire view for nothing (and would drag in the
+         *     ``top_picks_score`` SELECT alias that the ranked percentile selection
+         *     needs). ``total`` is ``len(paths)``, never a cached count, so the two
+         *     halves of the payload cannot disagree.
+         */
+        get: operations["api_photos_paths_api_photos_paths_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4360,15 +4412,39 @@ export interface components {
             /** Face Id */
             face_id: number;
         };
-        /** BatchPhotoRequest */
+        /**
+         * BatchPhotoRequest
+         * @description The set a batch write acts on: named paths, or the gallery view itself.
+         *
+         *     The gallery paginates at ``pagination.default_per_page`` with infinite
+         *     scroll, so a path list could only ever name the pages the client had
+         *     fetched. ``filters`` is the same query string the grid renders and the
+         *     server derives the rows from it, so a whole-view write puts no path list on
+         *     the wire at all; ``exclude`` carries the handful the user unticked.
+         *
+         *     Exactly one of the two: neither is a write with no target and no way to say
+         *     so, and both would leave which one wins undefined.
+         */
         BatchPhotoRequest: {
+            /** Exclude */
+            exclude?: string[] | null;
+            /** Filters */
+            filters?: {
+                [key: string]: unknown;
+            } | null;
             /** Photo Paths */
-            photo_paths: string[];
+            photo_paths?: string[] | null;
         };
         /** BatchRatingRequest */
         BatchRatingRequest: {
+            /** Exclude */
+            exclude?: string[] | null;
+            /** Filters */
+            filters?: {
+                [key: string]: unknown;
+            } | null;
             /** Photo Paths */
-            photo_paths: string[];
+            photo_paths?: string[] | null;
             /** Rating */
             rating: number;
         };
@@ -4725,6 +4801,8 @@ export interface components {
              * @default true
              */
             dry_run?: boolean;
+            /** Exclude */
+            exclude?: string[] | null;
             /** Filters */
             filters?: {
                 [key: string]: unknown;
@@ -4947,6 +5025,8 @@ export interface components {
         };
         /** ExportSidecarsRequest */
         ExportSidecarsRequest: {
+            /** Exclude */
+            exclude?: string[] | null;
             /** Filters */
             filters?: {
                 [key: string]: unknown;
@@ -5842,6 +5922,19 @@ export interface components {
             unassigned_faces?: number | null;
         };
         /**
+         * PhotoCountResponse
+         * @description How many rows the current gallery view holds, ignoring pagination.
+         *
+         *     What the client needs to render "select all N photos" without fetching a
+         *     single page of rows: the gallery paginates at
+         *     ``pagination.default_per_page``, so before this endpoint the only count the
+         *     client could act on was the one it had scrolled to.
+         */
+        PhotoCountResponse: {
+            /** Total */
+            total: number;
+        };
+        /**
          * PhotoFace
          * @description A face row as ``GET /api/photo/faces`` emits it, with its assignment.
          */
@@ -5888,6 +5981,21 @@ export interface components {
              * @default []
              */
             photos?: components["schemas"]["MapPhotoPoint"][];
+        };
+        /**
+         * PhotoPathsResponse
+         * @description Every path in the current gallery view, in no particular order.
+         *
+         *     Uncapped and unsorted on purpose: the client turns it into a Set, so the
+         *     order carries no information and an ORDER BY would only cost a sort over
+         *     the whole view. ``total`` is ``len(paths)`` rather than a cached count, so
+         *     the two can never disagree.
+         */
+        PhotoPathsResponse: {
+            /** Paths */
+            paths: string[];
+            /** Total */
+            total: number;
         };
         /** PhotoPerson */
         PhotoPerson: {
@@ -11153,6 +11261,26 @@ export interface operations {
             };
         };
     };
+    api_photos_count_api_photos_count_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PhotoCountResponse"];
+                };
+            };
+        };
+    };
     keeper_hints_api_photos_keeper_hints_post: {
         parameters: {
             query?: never;
@@ -11275,6 +11403,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PhotoMapCountResponse"];
+                };
+            };
+        };
+    };
+    api_photos_paths_api_photos_paths_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PhotoPathsResponse"];
                 };
             };
         };

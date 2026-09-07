@@ -14,7 +14,9 @@ from pydantic import ValidationError
 from api.auth import CurrentUser, get_optional_user
 from api.config import VIEWER_CONFIG, _FULL_CONFIG, cull_allow_trash
 from api.database import get_async_db, get_db
-from api.models.gallery import GalleryParams, Photo, PhotosResponse
+from api.models.gallery import (
+    GalleryParams, Photo, PhotoCountResponse, PhotoPathsResponse, PhotosResponse,
+)
 from api.models.discovery import PhotoSetResponse, PhotoTypeCountsResponse, ViewerConfigResponse
 from api.db_helpers import (
     get_existing_columns, get_cached_count_async,
@@ -889,6 +891,71 @@ async def api_select_bottom_percent(
         "truncated": cut > _SELECT_BOTTOM_MAX,
         "paths": paths,
     }
+
+
+@router.get("/api/photos/count", response_model=PhotoCountResponse,
+            response_model_exclude_unset=True)
+async def api_photos_count(
+    request: Request,
+    user: Optional[CurrentUser] = Depends(get_optional_user),
+):
+    """How many photos the current gallery view holds, across every page.
+
+    The gallery paginates at ``pagination.default_per_page`` with infinite
+    scroll, so "select all" could only ever mean "select what has been
+    fetched". This answers for the whole view from the same filters the grid
+    renders, so the client can hold a virtual whole-view selection instead of a
+    path list.
+    """
+    qp = dict(request.query_params)
+    try:
+        async with get_async_db() as conn:
+            user_id = user.user_id if user else None
+            from_clause, where_str, all_params = await _scope_for_request(conn, qp, user_id)
+            total = await get_cached_count_async(
+                conn, where_str, all_params, from_clause=from_clause
+            )
+    except ValidationError as e:
+        logger.warning("Gallery count parameter validation failed: %s", e.errors())
+        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+    except sqlite3.Error:
+        logger.exception("Failed to count the gallery view")
+        raise HTTPException(status_code=500, detail='Internal server error')
+    return {"total": total}
+
+
+@router.get("/api/photos/paths", response_model=PhotoPathsResponse,
+            response_model_exclude_unset=True)
+async def api_photos_paths(
+    request: Request,
+    user: Optional[CurrentUser] = Depends(get_optional_user),
+):
+    """Every path in the current gallery view, for a whole-view selection.
+
+    Uncapped and unordered: the client builds a Set from these, so an ORDER BY
+    would sort the entire view for nothing (and would drag in the
+    ``top_picks_score`` SELECT alias that the ranked percentile selection
+    needs). ``total`` is ``len(paths)``, never a cached count, so the two
+    halves of the payload cannot disagree.
+    """
+    qp = dict(request.query_params)
+    try:
+        async with get_async_db() as conn:
+            user_id = user.user_id if user else None
+            from_clause, where_str, all_params = await _scope_for_request(conn, qp, user_id)
+            cur = await conn.execute(
+                f"SELECT photos.path FROM {from_clause}{where_str}", all_params
+            )
+            rows = await cur.fetchall()
+            await cur.close()
+            paths = [r['path'] for r in rows]
+    except ValidationError as e:
+        logger.warning("Gallery paths parameter validation failed: %s", e.errors())
+        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+    except sqlite3.Error:
+        logger.exception("Failed to list the gallery view's paths")
+        raise HTTPException(status_code=500, detail='Internal server error')
+    return {"total": len(paths), "paths": paths}
 
 
 @router.get("/api/photos", response_model=PhotosResponse,

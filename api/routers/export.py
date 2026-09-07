@@ -22,7 +22,7 @@ import shutil
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from api.auth import CurrentUser, require_edition
 from api.config import VIEWER_CONFIG, cull_allow_trash, get_all_scan_directories
@@ -67,6 +67,11 @@ class EmbedMetadataRequest(BaseModel):
 class ExportSidecarsRequest(BaseModel):
     paths: Optional[list[str]] = Field(default=None, max_length=10000)
     filters: Optional[dict] = None
+    # Paths to drop from the filter set. The client's "whole view selected,
+    # minus these few" state, sent as the exceptions rather than as the whole
+    # selection. Capped well below SQLITE_MAX_VARIABLE_NUMBER because it binds
+    # one placeholder each into a single NOT IN (...).
+    exclude: Optional[list[str]] = Field(default=None, max_length=1000)
     overwrite: bool = False
 
 
@@ -79,6 +84,9 @@ class AlbumExportRequest(BaseModel):
 class CullApplyRequest(BaseModel):
     paths: Optional[list[str]] = Field(default=None, max_length=10000)
     filters: Optional[dict] = None
+    # See ExportSidecarsRequest.exclude. Only ever narrows the filter set, so it
+    # can never widen a destructive action.
+    exclude: Optional[list[str]] = Field(default=None, max_length=1000)
     action: Literal["copy_keeps", "trash_rejects", "move_rejects"]
     target_dir: Optional[str] = None
     # Off by default: rejecting a derived JPEG must not silently trash/move its
@@ -141,6 +149,23 @@ def _resolve_filter_paths(conn, filters, user_id, exclude=None):
         f"SELECT photos.path FROM {from_clause}{where_str}", params
     ).fetchall()
     return [row["path"] for row in rows]
+
+
+def _selected_paths(conn, body, user_id):
+    """The paths a ``paths``-or-``filters`` request acts on.
+
+    Explicit paths win; otherwise the filter set is resolved through the
+    gallery's own scope builder, which rejects a malformed filter set by
+    raising — a 422 here, rather than the 500 an escaping ``ValidationError``
+    would turn into.
+    """
+    if body.paths:
+        return body.paths
+    try:
+        return _resolve_filter_paths(conn, body.filters, user_id, body.exclude)
+    except ValidationError as e:
+        logger.warning("Export filter validation failed: %s", e.errors())
+        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
 
 
 def _fetch_regions_map(conn, paths):
@@ -664,10 +689,7 @@ def api_export_sidecars(
 
     user_id = user.user_id
     with get_db() as conn:
-        if body.paths:
-            paths = body.paths
-        else:
-            paths = _resolve_filter_paths(conn, body.filters, user_id)
+        paths = _selected_paths(conn, body, user_id)
         return _write_sidecars_for_paths(conn, paths, user_id, body.overwrite)
 
 
@@ -712,7 +734,7 @@ def api_cull_apply(
     # rejects are rejected. Photos in the selection that don't match are skipped.
     want_rejected = body.action != "copy_keeps"
     with get_db() as conn:
-        paths = body.paths if body.paths else _resolve_filter_paths(conn, body.filters, user_id)
+        paths = _selected_paths(conn, body, user_id)
         state = _reject_state_map(conn, paths, user_id)
         matching = [p for p in paths if state.get(p) == want_rejected]
         group_keys = _sequence_group_keys(conn, matching, user_id)
