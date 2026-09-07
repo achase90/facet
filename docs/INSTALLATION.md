@@ -240,7 +240,37 @@ survives `docker compose down && up`. Edit it directly to customize weights, the
 viewer password or categories by hand — see
 [Configuration](CONFIGURATION.md#defaults-and-your-override) for what to put in it and
 [the full key reference](CONFIGURATION.md) for what is available. An existing file is
-never overwritten.
+never overwritten — and its owner and mode are left alone. Facet re-modes and
+re-chowns only a config it created itself.
+
+### Container file ownership
+
+Facet only `chown`s and `chmod`s a `scoring_config.json` it created — an existing
+file keeps whatever owner and mode you gave it, indefinitely. The one exception: if a
+pre-existing config is not **readable** by the container's `facet` user (uid 1000),
+the entrypoint takes ownership of it anyway and says so on stderr, because an
+unreadable config locks every route with no way to reach the UI to fix it. Make the
+file readable instead of handing it over —
+`chmod o+r facet-config/scoring_config.json` — and Facet leaves it alone on the next
+start.
+
+Facet's own config writes (weights, category priorities, scoring contexts, the
+viewer-password upgrade, …) try to preserve the file's owner and mode too, rewriting
+it in place when they can't adopt the destination's owner outright. Under a plain
+rootless Podman/Docker setup that still isn't enough on its own, because your file is
+owned by a uid the container's `facet` user cannot become — you additionally need to
+make it **writable by the container user without giving up your own ownership**:
+
+```bash
+# 100999 = the host subuid the in-container facet user (uid 1000) maps to;
+# read yours off a file the container already made: stat -c %u facet-config/.facet_secret
+chown "$USER":100999 facet-config/scoring_config.json
+chmod 664 facet-config/scoring_config.json
+```
+
+The file then stays yours and editable, and Facet's writes keep it that way.
+Alternatives: `podman unshare chown` to edit a container-owned file in place, or
+`--userns=keep-id` (or a compose `user:` override) so the container user *is* you.
 
 > **Upgrading from a release before this change?** Earlier versions told you to
 > copy the defaults file to `scoring_config.json` and uncomment a

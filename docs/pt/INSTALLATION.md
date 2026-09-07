@@ -248,7 +248,42 @@ pontuação) sobrevive a um `docker compose down && up`. Edite-o diretamente par
 personalizar pesos, a senha do visualizador ou categorias à mão — veja
 [Configuração](CONFIGURATION.md#padrões-e-seu-override) para o que colocar nele e
 [a referência completa das chaves](CONFIGURATION.md) para o que está disponível. Um
-arquivo já existente nunca é sobrescrito.
+arquivo já existente nunca é sobrescrito — e seu dono e suas permissões
+permanecem intactos. O Facet só altera permissões e dono de uma configuração que
+ele mesmo criou.
+
+### Propriedade do arquivo no contêiner
+
+O Facet só faz `chown` e `chmod` em um `scoring_config.json` que ele mesmo criou
+— um arquivo já existente mantém o dono e as permissões que você deu a ele,
+indefinidamente. A única exceção: se uma configuração preexistente não é
+**legível** pelo usuário `facet` do contêiner (uid 1000), o entrypoint assume a
+posse dela mesmo assim e avisa isso no stderr, porque uma configuração ilegível
+trava todas as rotas sem nenhuma forma de chegar à interface para corrigir isso.
+Torne o arquivo legível em vez de entregá-lo —
+`chmod o+r facet-config/scoring_config.json` — e o Facet o deixará em paz na
+próxima inicialização.
+
+As próprias gravações de configuração do Facet (pesos, prioridades de
+categorias, contextos de pontuação, a migração da senha do visualizador, …)
+também tentam preservar o dono e as permissões do arquivo, reescrevendo-o no
+lugar quando não conseguem adotar diretamente o dono do destino. Em um
+Podman/Docker rootless comum, isso sozinho não basta, porque seu arquivo
+pertence a um uid que o usuário `facet` do contêiner não pode se tornar — você
+também precisa torná-lo **gravável pelo usuário do contêiner sem abrir mão da
+sua própria posse**:
+
+```bash
+# 100999 = o subuid do host para o qual o usuário facet dentro do contêiner (uid 1000) é mapeado;
+# veja o seu em um arquivo já criado pelo contêiner: stat -c %u facet-config/.facet_secret
+chown "$USER":100999 facet-config/scoring_config.json
+chmod 664 facet-config/scoring_config.json
+```
+
+O arquivo então continua seu e editável, e as gravações do Facet o mantêm
+assim. Alternativas: `podman unshare chown` para editar no lugar um arquivo
+pertencente ao contêiner, ou `--userns=keep-id` (ou uma diretiva `user:` no
+compose) para que o usuário do contêiner seja você.
 
 > **Está atualizando de uma versão anterior a esta mudança?** As versões anteriores
 > mandavam copiar o arquivo de padrões para `scoring_config.json` e descomentar uma

@@ -94,6 +94,10 @@ Ein Ziel, das außerhalb jedes eingehängten Volumes liegt, wird abgelehnt (`403
 
 **Das ist kein Rechteproblem des Container-Benutzers.** Die UID des `facet`-Benutzers im Container unterscheidet sich häufig von der Ihres Host-Kontos, und das kann auf einem Bind-Mount ein echtes, separates Dateisystem-Rechteproblem verursachen — aber das geschieht *nachdem* diese Pfadprüfung bestanden wurde, wenn das Kopieren/Verlinken/Verschieben tatsächlich läuft, und es wird serverseitig mit dem zugrunde liegenden Betriebssystemfehler für die fehlgeschlagene Datei protokolliert. Ein `403 target_dir is not an allowed export location` (oder ein allgemeines „Zugriff verweigert" in der Oberfläche) geschieht *bevor* irgendeine Datei berührt wird und hat nichts mit UIDs zu tun.
 
+### Dateibesitz der Konfiguration
+
+Dieselbe UID-Grenze gilt auch für `/config/scoring_config.json` selbst. Facet übernimmt nur den Besitz einer Konfiguration, die es selbst angelegt hat; eine bereits vorhandene Datei behält den Eigentümer und die Rechte, die Sie ihr gegeben haben, und Facets eigene Konfigurationsschreibvorgänge versuchen nun, das zu erhalten, statt die Datei an den UID zu übergeben, unter dem der Container läuft. Siehe [Installation — Dateibesitz im Container](INSTALLATION.md#dateibesitz-im-container) für das, was garantiert ist, den einen Fall, in dem Facet trotzdem den Besitz übernimmt (eine bereits vorhandene Konfiguration, die der `facet`-Benutzer des Containers nicht lesen kann), und das Rezept, damit eine unter rootless Podman eingehängte Konfiguration zugleich Ihre bleibt und für den Container beschreibbar ist.
+
 ## Erstellen des Angular-Clients
 
 Der FastAPI-Server stellt die vorab erstellte SPA aus `client/dist/client/browser/` bereit. Erstellen Sie sie vor der Bereitstellung:

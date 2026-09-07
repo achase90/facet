@@ -250,7 +250,42 @@ priorités, contextes de notation) survit à un `docker compose down && up`. Éd
 directement pour personnaliser à la main les poids, le mot de passe d'édition ou les
 catégories — voir [Configuration](CONFIGURATION.md#valeurs-par-défaut-et-votre-surcharge)
 pour savoir quoi y mettre et [la référence complète des clés](CONFIGURATION.md) pour ce
-qui est disponible. Un fichier déjà présent n'est jamais écrasé.
+qui est disponible. Un fichier déjà présent n'est jamais écrasé — et son
+propriétaire et ses droits restent intacts. Facet ne change les droits et le
+propriétaire que d'une configuration qu'il a lui-même créée.
+
+### Propriété du fichier en conteneur
+
+Facet ne fait `chown` et `chmod` que sur un `scoring_config.json` qu'il a créé — un
+fichier déjà présent conserve le propriétaire et les droits que vous lui avez
+donnés, indéfiniment. La seule exception : si une configuration préexistante n'est
+pas **lisible** par l'utilisateur `facet` du conteneur (uid 1000), l'entrypoint en
+prend quand même possession et le signale sur stderr, car une configuration
+illisible verrouille toutes les routes sans aucun moyen d'atteindre l'interface pour
+la corriger. Rendez le fichier lisible plutôt que de le lui céder —
+`chmod o+r facet-config/scoring_config.json` — et Facet le laissera tranquille au
+prochain démarrage.
+
+Les écritures de configuration propres à Facet (poids, priorités de catégories,
+contextes de notation, mise à niveau du mot de passe d'édition, …) tentent elles
+aussi de préserver le propriétaire et les droits du fichier, en le réécrivant sur
+place quand elles ne peuvent pas reprendre directement le propriétaire de la
+destination. Sous un Podman/Docker rootless classique, cela ne suffit pas à soi
+seul, car votre fichier appartient à un uid que l'utilisateur `facet` du conteneur
+ne peut pas devenir — vous devez en plus le rendre **inscriptible par l'utilisateur
+du conteneur sans renoncer à votre propre propriété** :
+
+```bash
+# 100999 = le subuid hôte auquel l'utilisateur facet du conteneur (uid 1000) est mappé ;
+# lisez le vôtre sur un fichier déjà créé par le conteneur : stat -c %u facet-config/.facet_secret
+chown "$USER":100999 facet-config/scoring_config.json
+chmod 664 facet-config/scoring_config.json
+```
+
+Le fichier reste alors à vous et éditable, et les écritures de Facet le
+maintiennent ainsi. Alternatives : `podman unshare chown` pour éditer sur place un
+fichier appartenant au conteneur, ou `--userns=keep-id` (ou une directive `user:`
+dans le compose) pour que l'utilisateur du conteneur soit vous.
 
 > **Vous migrez depuis une version antérieure à ce changement ?** Les versions
 > précédentes indiquaient de copier le fichier des valeurs par défaut vers
