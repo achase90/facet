@@ -807,10 +807,13 @@ class WeightOptimizer:
         """Rewrite one category's weights with the config lock already held.
 
         The lock spans this whole read-modify-write rather than the write
-        alone. ``atomic_write_json`` is atomic per WRITE, so a concurrent
-        writer landing between the read below and the write at the end has its
-        update overwritten wholesale; CLAUDE.md makes that lock the single one
-        every scoring_config.json writer shares. Nothing here may call
+        alone. ``atomic_write_json`` is at BEST atomic per WRITE — and only on
+        its rename route; where it has to rewrite the file in place to keep the
+        operator's ownership, even a single write is not atomic against an
+        outside reader. Either way a concurrent writer landing between the read
+        below and the write at the end has its update overwritten wholesale;
+        CLAUDE.md makes that lock the single one every scoring_config.json
+        writer shares. Nothing here may call
         ``reload_config``, which reaches the same lock through ``_load_config``
         and would deadlock against the frame above.
         """
@@ -880,15 +883,20 @@ class WeightOptimizer:
             logger.info("Adjusted %s by %+.1f%% to ensure 100%% total", largest_key, adjustment)
 
         # Save through the shared config writer rather than a local
-        # open()+os.replace(): it is the one primitive that keeps the two
+        # open()+os.replace(): it is the one primitive that keeps the three
         # properties this file needs. It copies the DESTINATION's mode onto the
         # replacement, so the 0600 docker-entrypoint.sh seeds on a config
         # holding viewer.password, users.*.password_hash, upload.password,
         # frame.tokens and immich.api_key in plaintext survives an --apply
-        # instead of widening to the umask default forever; and it stages under
-        # a dotted, gitignored scratch name, so a crash between the write and
-        # the rename cannot leave a complete copy of that config under a
-        # stageable one. Imported lazily because api.config mints the server
+        # instead of widening to the umask default forever; it keeps that file's
+        # OWNER too, rewriting it through its own inode rather than renaming a
+        # new one over it when the two differ, so an --apply run inside a
+        # rootless container does not leave the operator's config owned by a
+        # subuid they cannot chown back from; and it stages under a dotted,
+        # gitignored scratch name, so an interrupted write cannot leave a
+        # complete copy of that config under a stageable one -- which matters
+        # more now, since the one interruption it cannot undo KEEPS that copy on
+        # purpose. Imported lazily because api.config mints the server
         # secret at import — the same lazy-import shape facet.py already uses
         # for map_disk_path.
         from api.config import write_user_config

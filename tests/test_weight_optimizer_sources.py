@@ -6,18 +6,21 @@ disagrees with explicit votes, the production-aligned feature space, the
 config-key apply path, and the held-out gate on the apply decision.
 """
 
+import errno
 import json
 import os
 import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
 import pytest
 
+import config_resolve
 from db.schema import init_database
 from optimization.weight_optimizer import WeightOptimizer, run_weight_optimization
 
@@ -356,6 +359,13 @@ class TestApplyPreservesConfigPermissions:
     docker-compose.yml promises the mode survives every later write, so the
     replacement must land at the destination's mode and must stage through a
     name no `git add -A` can pick up.
+
+    Ownership is the third property, and it is the one a rename cannot keep:
+    ``os.replace`` commits into a new inode owned by whoever ran the optimizer,
+    so under a rootless container every --apply used to hand the operator's
+    config to a subuid they could not chown back from. The writer now rewrites
+    the file through its own descriptor when it cannot adopt that owner, and the
+    mode and the scratch-name guarantees have to hold on that route too.
     """
 
     REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -410,6 +420,53 @@ class TestApplyPreservesConfigPermissions:
                 cwd=self.REPO_ROOT, capture_output=True,
             )
             assert ignored.returncode == 0, f"scratch name {name!r} is stageable"
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason="POSIX ownership has no Windows analogue")
+    def test_an_unadoptable_owner_keeps_the_inode_the_mode_and_the_weights(
+            self, tmp_path, monkeypatch):
+        """The in-place twin of the two mode assertions above. A rootless
+        container cannot chown the operator's config, so the write goes through
+        the file's own inode -- and must still be a complete, correctly-moded
+        config with the new weights in it and no scratch file beside it."""
+        cfg = self._config(tmp_path, 0o600)
+        before = os.stat(cfg)
+        real_identity = config_resolve._destination_identity
+
+        class _ForeignOwner:
+            """The real lstat wearing somebody else's uid: an unprivileged test
+            cannot create a file it does not own, so the answer is faked while
+            st_ino and st_dev -- which the in-place route re-checks -- stay real."""
+
+            def __init__(self, real):
+                self._real = real
+                self.st_uid = real.st_uid + 1
+                self.st_gid = real.st_gid + 1
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        def _foreign(path):
+            info = real_identity(path)
+            return info if info is None else _ForeignOwner(info)
+
+        def _refuse(*args, **kwargs):
+            # Two-arg, so errno is EPERM and not None: a bare PermissionError is
+            # re-raised as a bug rather than downgraded to the in-place route.
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+
+        monkeypatch.setattr(config_resolve, "_destination_identity", _foreign)
+        monkeypatch.setattr(os, "chown", _refuse)
+
+        WeightOptimizer("unused.db", str(cfg)).apply_optimized_weights(
+            {"aesthetic": 1.0}, category="portrait", backup=False
+        )
+
+        written = json.loads(cfg.read_text())
+        assert os.stat(cfg).st_ino == before.st_ino, "the config was renamed over, so it changed owner"
+        assert written["viewer"]["password"] == "plaintext-secret"
+        assert written["categories"][0]["weights"]["aesthetic_percent"] == 100.0
+        assert stat.S_IMODE(os.stat(cfg).st_mode) == 0o600
+        assert [p.name for p in tmp_path.iterdir()] == ["scoring_config.json"]
 
     def test_apply_leaves_no_scratch_file_behind(self, tmp_path):
         cfg = self._config(tmp_path, 0o600)
