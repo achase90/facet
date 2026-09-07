@@ -11,7 +11,7 @@ describe('CullDialogComponent', () => {
   let post: ReturnType<typeof vi.fn>;
   let dialogClose: ReturnType<typeof vi.fn>;
 
-  function build(paths = ['/a.jpg', '/b.jpg']) {
+  function build(paths = ['/a.jpg', '/b.jpg'], trashAvailable?: boolean) {
     post = vi.fn(() => of({ would_copy: paths, skipped: [] }));
     dialogClose = vi.fn();
     TestBed.configureTestingModule({
@@ -20,7 +20,7 @@ describe('CullDialogComponent', () => {
         { provide: MatSnackBar, useValue: { open: vi.fn() } },
         { provide: I18nService, useValue: { t: (k: string) => k } },
         { provide: MatDialogRef, useValue: { close: dialogClose } },
-        { provide: MAT_DIALOG_DATA, useValue: { paths } },
+        { provide: MAT_DIALOG_DATA, useValue: { paths, trashAvailable } },
       ],
     });
     component = TestBed.runInInjectionContext(() => new CullDialogComponent());
@@ -31,6 +31,9 @@ describe('CullDialogComponent', () => {
   }
   function read<T>(name: string): T {
     return (component as unknown as Record<string, () => T>)[name]();
+  }
+  function actions(): string[] {
+    return (component as unknown as { actions: string[] }).actions;
   }
 
   it('defaults to the additive copy action and needs a target', () => {
@@ -43,6 +46,21 @@ describe('CullDialogComponent', () => {
     build();
     (component as unknown as { setAction(a: string): void }).setAction('trash_rejects');
     expect(read<boolean>('needsTarget')).toBe(false);
+  });
+
+  it('omits trash_rejects from actions when trashAvailable is false', () => {
+    build(['/a.jpg', '/b.jpg'], false);
+    expect(actions()).not.toContain('trash_rejects');
+  });
+
+  it('omits trash_rejects from actions when trashAvailable is not passed (fail-closed)', () => {
+    build();
+    expect(actions()).not.toContain('trash_rejects');
+  });
+
+  it('includes trash_rejects in actions when trashAvailable is true', () => {
+    build(['/a.jpg', '/b.jpg'], true);
+    expect(actions()).toContain('trash_rejects');
   });
 
   it('preview posts dry_run=true and stores the affected list', async () => {

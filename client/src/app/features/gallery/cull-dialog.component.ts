@@ -123,9 +123,11 @@ export class CullDialogComponent {
   private readonly snackBar = inject(MatSnackBar);
   private readonly i18n = inject(I18nService);
   private readonly dialogRef = inject(MatDialogRef<CullDialogComponent>);
-  private readonly data = inject<{ paths: string[] }>(MAT_DIALOG_DATA);
+  private readonly data = inject<{ paths: string[]; trashAvailable?: boolean }>(MAT_DIALOG_DATA);
 
-  protected readonly actions: CullAction[] = ['copy_keeps', 'move_rejects', 'trash_rejects'];
+  protected readonly actions: CullAction[] = this.data.trashAvailable
+    ? ['copy_keeps', 'move_rejects', 'trash_rejects']
+    : ['copy_keeps', 'move_rejects'];
   protected readonly action = signal<CullAction>('copy_keeps');
   protected readonly targetDir = signal('');
   protected readonly includeCompanions = signal(false);
