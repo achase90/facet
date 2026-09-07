@@ -1424,6 +1424,36 @@ def _social_export_presets() -> dict:
     return {'presets': presets}
 
 
+_send2trash_available = None
+
+
+def _cull_capabilities() -> dict:
+    """Whether the ``trash_rejects`` action on ``/api/cull/apply`` can succeed.
+
+    Mirrors that endpoint's own two-part refusal (``export.py``): a 403 when
+    ``viewer.cull.allow_trash`` is off, a 400 when the ``send2trash`` package
+    is missing. Read ``allow_trash`` exactly the way that endpoint does --
+    ``(VIEWER_CONFIG.get('cull', {}) or {}).get('allow_trash', False)`` --
+    the ``or {}`` matters because a config can hold ``"cull": null`` rather
+    than omitting the key.
+
+    The package probe uses ``importlib.util.find_spec`` rather than a real
+    ``import``: this function runs on ``/api/config``, which is on the SPA's
+    startup path, and a real import would pay ``send2trash``'s module init
+    cost on every page load just to answer a yes/no question. The probe's
+    answer is memoized at module scope -- whether the package is importable
+    cannot change without a process restart (the venv is fixed for the
+    process's lifetime), while ``find_spec`` itself walks ``sys.path`` on
+    every call, so caching turns a per-request filesystem scan into one.
+    """
+    global _send2trash_available
+    if _send2trash_available is None:
+        import importlib.util
+        _send2trash_available = importlib.util.find_spec("send2trash") is not None
+    allow_trash = (VIEWER_CONFIG.get('cull', {}) or {}).get('allow_trash', False)
+    return {'allow_trash': allow_trash, 'trash_available': allow_trash and _send2trash_available}
+
+
 def _render_migration_status():
     """How many RAW rows still carry a thumbnail from the old render profile.
 
@@ -1490,6 +1520,7 @@ def api_config(user: Optional[CurrentUser] = Depends(get_optional_user)):
         'quality_thresholds': VIEWER_CONFIG['quality_thresholds'],
         'social_export': _social_export_presets(),
         'cull_styles': get_cull_styles(),
+        'cull': _cull_capabilities(),
         'moment_confidence_min': VIEWER_CONFIG.get('moment_confidence_min', 0),
         'notification_duration_ms': VIEWER_CONFIG.get('notification_duration_ms', 2000),
         'translation_target_language': _FULL_CONFIG.get('translation', {}).get('target_language', ''),

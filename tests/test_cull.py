@@ -17,8 +17,10 @@ from unittest import mock
 import pytest
 
 from db.schema import init_database
+from api.routers import gallery as gallery_module
 
 _EXPORT_MODULE = "api.routers.export"
+_GALLERY_MODULE = "api.routers.gallery"
 
 
 @pytest.fixture()
@@ -590,3 +592,88 @@ class TestCullAuth:
             "paths": ["/a.jpg"], "action": "copy_keeps", "target_dir": "/x",
         })
         assert resp.status_code in (401, 403)
+
+
+class TestCullCapabilities:
+    """GET /api/config's `cull` key (api.models.discovery.CullCapabilities).
+
+    It mirrors /api/cull/apply's own two-part refusal on `trash_rejects` --
+    403 when `viewer.cull.allow_trash` is off, 400 when `send2trash` is
+    missing -- as two separate booleans, so a client can tell "an operator
+    disabled this" apart from "this environment is missing a package" without
+    calling the destructive endpoint just to read its error.
+
+    `gallery.py` memoizes the `send2trash` probe in the module-level
+    `_send2trash_available` (never re-walks `sys.path` after the first call
+    in a process), so `mock.patch.dict("sys.modules", {"send2trash": None})`
+    -- the trick `TestCullApply` uses on the export module -- would be
+    silently inert here once anything in the test process has already primed
+    the memo. These patch `_send2trash_available` itself instead, which is
+    the only thing `_cull_capabilities` actually reads.
+    """
+
+    def _cull_payload(self, client, allow_trash, package_present):
+        # Merge onto the real VIEWER_CONFIG rather than replacing it outright:
+        # /api/config also reads 'defaults', 'pagination', 'display', etc.,
+        # and a bare {"cull": {...}} would 500 on a KeyError for those.
+        config = {**gallery_module.VIEWER_CONFIG, "cull": {"allow_trash": allow_trash}}
+        with (
+            mock.patch(f"{_GALLERY_MODULE}.VIEWER_CONFIG", config),
+            mock.patch(f"{_GALLERY_MODULE}._send2trash_available", package_present),
+        ):
+            resp = client.get("/api/config")
+        assert resp.status_code == 200
+        return resp.json()["cull"]
+
+    def test_trash_off_package_present(self, client):
+        assert self._cull_payload(client, allow_trash=False, package_present=True) == {
+            "allow_trash": False, "trash_available": False,
+        }
+
+    def test_trash_on_package_absent(self, client):
+        assert self._cull_payload(client, allow_trash=True, package_present=False) == {
+            "allow_trash": True, "trash_available": False,
+        }
+
+    def test_trash_on_package_present(self, client):
+        assert self._cull_payload(client, allow_trash=True, package_present=True) == {
+            "allow_trash": True, "trash_available": True,
+        }
+
+    def test_trash_off_package_absent(self, client):
+        assert self._cull_payload(client, allow_trash=False, package_present=False) == {
+            "allow_trash": False, "trash_available": False,
+        }
+
+    def test_cull_null_in_config_is_treated_as_absent(self, client):
+        """`"cull": null` is valid JSON an operator can write; `allow_trash`
+        must fall back to False rather than raising on `None.get(...)`."""
+        config = {**gallery_module.VIEWER_CONFIG, "cull": None}
+        with (
+            mock.patch(f"{_GALLERY_MODULE}.VIEWER_CONFIG", config),
+            mock.patch(f"{_GALLERY_MODULE}._send2trash_available", True),
+        ):
+            resp = client.get("/api/config")
+        assert resp.status_code == 200
+        assert resp.json()["cull"] == {"allow_trash": False, "trash_available": False}
+
+    def test_the_real_probe_finds_the_installed_package(self, client):
+        """Every other test in this class patches `_send2trash_available`
+        directly, so none of them ever calls `importlib.util.find_spec` for
+        real -- a misspelled module name (`send_2_trash`, `send2Trash`) or an
+        inverted memo sentinel would still pass all of them, and `/api/config`
+        would report `trash_available: false` on a perfectly good install
+        with nothing red. `send2trash` is a base dependency (`requirements.txt`
+        and both lock files) and is installed in this venv, so resetting the
+        memo to `None` -- its genuine pre-any-request state -- and letting
+        `_cull_capabilities` re-prime it is not environment-fragile: it
+        asserts the packaging fix and the probe together.
+        """
+        config = {**gallery_module.VIEWER_CONFIG, "cull": {"allow_trash": True}}
+        with (
+            mock.patch(f"{_GALLERY_MODULE}.VIEWER_CONFIG", config),
+            mock.patch(f"{_GALLERY_MODULE}._send2trash_available", None),
+        ):
+            resp = client.get("/api/config")
+        assert resp.status_code == 200
+        assert resp.json()["cull"] == {"allow_trash": True, "trash_available": True}

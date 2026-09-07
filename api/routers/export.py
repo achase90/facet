@@ -780,7 +780,8 @@ def api_cull_apply(
     try:
         import send2trash
     except ImportError:
-        raise HTTPException(status_code=400, detail="send2trash is not installed")
+        raise HTTPException(status_code=400,
+                            detail="send2trash ships with Facet — upgrade the image or run pip install send2trash")
     if body.dry_run:
         return respond(True, [], would_trash=files)
     trashed = errors = 0
