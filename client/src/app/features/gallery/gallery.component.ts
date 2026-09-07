@@ -29,12 +29,13 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { ActivatedRoute, Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
-import { GalleryStore, PhotoFlagSnapshot } from './gallery.store';
+import { GalleryStore, BatchResult } from './gallery.store';
 import { Photo } from '../../shared/models/photo.model';
 import { isTypingContext } from '../../shared/utils/keyboard';
 import { UndoService } from '../../core/services/undo.service';
 import { SequenceOverrideService, SequenceKind } from '../../core/services/sequence-override.service';
 import { SequenceKindIconPipe } from '../../shared/pipes/sequence-kind.pipe';
+import { IsSelectedPipe } from '../../shared/pipes/selection.pipe';
 import { PhotoSetKindIconPipe, PhotoSetKindLabelPipe } from '../../shared/pipes/photo-set-kind.pipe';
 import { AuthService } from '../../core/services/auth.service';
 import { useDesktopSignal, DETAILS_RAIL_MIN_WIDTH_PX } from '../../shared/utils/media-query';
@@ -85,6 +86,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
     MatBottomSheetModule,
     TranslatePipe,
     SequenceKindIconPipe,
+    IsSelectedPipe,
     PhotoSetKindIconPipe,
     PhotoSetKindLabelPipe,
     MatSnackBarModule,
@@ -296,7 +298,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [hideDetails]="true"
                       [mosaicMode]="effectiveGalleryMode() === 'mosaic'"
                       [config]="store.config()"
-                      [isSelected]="selectedPaths().has(photo.path)"
+                      [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
                       [currentSort]="store.filters().sort"
                       [thumbSize]="thumbSize()"
                       [isEditionMode]="auth.isEdition()"
@@ -339,7 +341,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                   [photo]="photo"
                   [attr.data-pidx]="i"
                   [config]="store.config()"
-                  [isSelected]="selectedPaths().has(photo.path)"
+                  [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
                   [hideDetails]="effectiveHideDetails()"
                   [currentSort]="store.filters().sort"
                   [thumbSize]="thumbSize()"
@@ -387,7 +389,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [hideDetails]="true"
                       [mosaicMode]="true"
                       [config]="store.config()"
-                      [isSelected]="selectedPaths().has(photo.path)"
+                      [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
                       [currentSort]="store.filters().sort"
                       [thumbSize]="thumbSize()"
                       [isEditionMode]="auth.isEdition()"
@@ -512,8 +514,17 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
 
     <!-- Selection action bar -->
     @if (selectionCount()) {
-      <div class="fixed bottom-0 left-0 right-0 z-50 flex items-center justify-center gap-1 lg:gap-3 px-2 lg:px-6 py-1 lg:py-3 max-lg:pb-[max(0.25rem,env(safe-area-inset-bottom))] bg-[var(--mat-sys-surface-container)] border-t border-[var(--mat-sys-outline-variant)] shadow-lg">
-        <span class="text-sm font-medium shrink-0">{{ I18N.gallery.selection.count | translate:{ count: selectionCount() } }}</span>
+      <div class="fixed bottom-0 left-0 right-0 z-50 flex flex-wrap items-center justify-center gap-1 lg:gap-3 px-2 lg:px-6 py-1 lg:py-3 max-lg:pb-[max(0.25rem,env(safe-area-inset-bottom))] bg-[var(--mat-sys-surface-container)] border-t border-[var(--mat-sys-outline-variant)] shadow-lg">
+        <!-- Every loaded photo is selected, but the view runs past the pages
+             fetched so far. Offer the rest explicitly on its own line (w-full
+             in a wrapping row) rather than silently widening what was asked. -->
+        @if (offerWholeView()) {
+          <div class="w-full flex flex-wrap items-center justify-center gap-2 text-xs opacity-80">
+            <span>{{ I18N.gallery.selection.view_scope_offer | translate:{ count: store.photos().length } }}</span>
+            <button mat-button class="!text-xs" (click)="selectWholeView()">{{ I18N.gallery.selection.view_scope_select_all | translate:{ total: store.total() } }}</button>
+          </div>
+        }
+        <span class="text-sm font-medium shrink-0">{{ (viewScoped() ? I18N.gallery.selection.view_scope_active : I18N.gallery.selection.count) | translate:{ count: selectionCount() } }}</span>
         <div class="flex items-center gap-0 lg:gap-2">
           <button mat-icon-button class="lg:!hidden" (click)="clearSelection()" [matTooltip]="I18N.gallery.selection.clear | translate" [attr.aria-label]="I18N.gallery.selection.clear | translate"><mat-icon>close</mat-icon></button>
           <button mat-button class="!hidden lg:!inline-flex" (click)="clearSelection()"><mat-icon>close</mat-icon> {{ I18N.gallery.selection.clear | translate }}</button>
@@ -654,11 +665,29 @@ export class GalleryComponent implements OnInit, OnDestroy {
 
   // Selection state lives in the store (survives navigation, visible to services)
   protected readonly selectedPaths = this.store.selectedPaths;
+  protected readonly excludedPaths = this.store.excludedPaths;
   protected readonly selectionCount = this.store.selectionCount;
+  /** True while the selection means "the whole filtered view", not a path list. */
+  protected readonly viewScoped = this.store.viewScopeSelected;
 
   /** True when every loaded photo is already selected. */
   protected readonly allLoadedSelected = computed(() =>
     this.store.photos().length > 0 && this.selectionCount() >= this.store.photos().length,
+  );
+
+  /**
+   * Whether to offer widening the selection to the whole filtered view.
+   *
+   * Only when it would actually add something: the loaded photos are all
+   * selected, the view holds more than those, and the selection is not already
+   * view-scoped. Withheld under a similarity/semantic view, where there is no
+   * filter payload that reproduces what is on screen.
+   */
+  protected readonly offerWholeView = computed(() =>
+    !this.viewScoped()
+    && this.store.canScopeSelectionToView()
+    && this.allLoadedSelected()
+    && this.store.total() > this.store.photos().length,
   );
 
   /** True when the device has no hover capability (touch device) */
@@ -1107,12 +1136,22 @@ export class GalleryComponent implements OnInit, OnDestroy {
     this.store.clearSelection();
   }
 
+  /**
+   * Both of these branch on whether anything is selected yet — an empty
+   * selection widens to the whole filtered view, a partial one to the loaded
+   * photos. The branch lives in the store rather than here so the three entry
+   * points (this bar, the mobile actions sheet, Ctrl+A) cannot drift apart.
+   */
   protected selectAll(): void {
-    this.store.selectAllLoaded();
+    this.store.selectAll();
   }
 
   protected invertSelection(): void {
     this.store.invertSelection();
+  }
+
+  protected selectWholeView(): void {
+    this.store.selectWholeView();
   }
 
   /** Two panes is the smallest useful compare; past four they are too small to read. */
@@ -1121,7 +1160,7 @@ export class GalleryComponent implements OnInit, OnDestroy {
   );
 
   protected async compareSelection(): Promise<void> {
-    const selected = this.selectedPaths();
+    const selected = new Set(this.store.selectedLoadedPaths());
     // Keep the grid's order rather than selection order: comparing left-to-right
     // as they are laid out is what the user is already looking at.
     const photos = this.store.photos().filter(p => selected.has(p.path)).slice(0, MAX_COMPARE_PANES);
@@ -1147,37 +1186,106 @@ export class GalleryComponent implements OnInit, OnDestroy {
     this.selectAll();
   }
 
-  protected copyPaths(): void {
-    const filenames = [...this.selectedPaths()].map(basename);
-    copyLines(filenames).then(() => {
-      this.snackBar.open(this.i18n.t(I18N.gallery.selection.copied), '', { duration: 2000 });
-    });
+  /**
+   * The selected paths as strings, fetched from the server when the selection
+   * is the whole view.
+   *
+   * Only for the handful of actions that genuinely need filenames on the client
+   * (copy, download, add-to-album): everything else sends the filter and lets
+   * the server derive the rows, which is the point of the view scope.
+   */
+  private async resolveSelectionPaths(): Promise<string[] | null> {
+    if (!this.viewScoped()) return [...this.selectedPaths()];
+    return this.store.pathsInView();
+  }
+
+  protected async copyPaths(): Promise<void> {
+    const paths = await this.resolveSelectionPaths();
+    if (!paths?.length) return;
+    await copyLines(paths.map(basename));
+    this.snackBar.open(this.i18n.t(I18N.gallery.selection.copied), '', { duration: 2000 });
   }
 
   /** Above this size, undo (chunked per-photo inverse calls) is not offered. */
   private static readonly UNDO_MAX_PHOTOS = 500;
 
+  /** Above this many photos a download is confirmed first: it is one blob fetch
+   *  plus one synthetic anchor click per photo, and a whole-view selection (or
+   *  a "Keep top N%" one) turns that into thousands. */
+  private static readonly DOWNLOAD_CONFIRM_PHOTOS = 50;
+
+  /** The server caps a sequence correction at 500 frames, and a set is a
+   *  handful of frames one camera shot together — so it is never "the view". */
+  private static readonly MARK_SEQUENCE_MAX_PHOTOS = 500;
+
+  /**
+   * Ask before a mutation runs over the whole filtered view.
+   *
+   * The count comes from the server rather than from `total()`, which is only
+   * ever whichever page response landed last. Returns the number shown to the
+   * user, or null if they declined (or it could not be fetched) — the caller
+   * checks the server's own count against it afterwards.
+   */
+  private async confirmWholeView(): Promise<number | null> {
+    const total = await this.store.countInView();
+    if (total === null) return null;
+    const count = Math.max(0, total - this.excludedPaths().size);
+    if (count === 0) {
+      this.snackBar.open(this.i18n.t(I18N.gallery.selection.view_scope_empty), '', { duration: 3000 });
+      return null;
+    }
+    const ref = this.dialog.open(ConfirmDialogComponent, {
+      data: {
+        title: this.i18n.t(I18N.gallery.selection.view_scope_confirm_title),
+        message: this.i18n.t(I18N.gallery.selection.view_scope_confirm_message, { count }),
+      },
+    });
+    const confirmed = await firstValueFrom(ref.afterClosed());
+    return confirmed ? count : null;
+  }
+
   private async executeBatchAction(
-    action: (paths: string[]) => Promise<Map<string, PhotoFlagSnapshot> | null>,
+    action: (paths: string[]) => Promise<BatchResult | null>,
     i18nKey: string,
     extraParams?: Record<string, string | number>,
   ): Promise<void> {
+    const viewScoped = this.viewScoped();
+    let announced: number | null = null;
+    if (viewScoped) {
+      announced = await this.confirmWholeView();
+      if (announced === null) return;
+    }
     const paths = [...this.selectedPaths()];
-    const snapshot = await action(paths);
-    if (snapshot === null) return; // store reverted and notified
+    const result = await action(paths);
+    if (result === null) return; // store reverted and notified
     this.clearSelection();
-    const params = { count: paths.length, ...extraParams };
-    if (snapshot.size > 0 && snapshot.size <= GalleryComponent.UNDO_MAX_PHOTOS) {
+    const params = { count: result.count, ...extraParams };
+    // Undo replays inverse calls from a snapshot, and the snapshot can only
+    // cover LOADED photos -- so offering it for an action that reached further
+    // would promise to restore 64 of 5,000. Gate on coverage, not just size.
+    const covered = result.snapshot.size === result.targeted;
+    if (covered && result.snapshot.size > 0 && result.snapshot.size <= GalleryComponent.UNDO_MAX_PHOTOS) {
       this.undoService.register({
         labelKey: i18nKey,
         labelParams: params,
         undo: async () => {
-          await this.store.restoreSnapshot(snapshot);
-          this.store.restoreSelection(paths);
+          await this.store.restoreSnapshot(result.snapshot);
+          // The snapshot's keys, not `paths`: they are the same set whenever
+          // undo is offered at all (that is what `covered` asserts), and they
+          // are the only ones a view-scoped action ever named.
+          this.store.restoreSelection(result.snapshot.keys());
         },
       });
     } else {
       this.snackBar.open(this.i18n.t(i18nKey, params), '', { duration: 2000 });
+    }
+    // The view can move between the count and the write (another session, a
+    // scan). Say so rather than absorbing it: the user approved a number.
+    if (announced !== null && announced !== result.count) {
+      this.snackBar.open(
+        this.i18n.t(I18N.gallery.selection.view_scope_mismatch, { count: result.count, announced }),
+        '', { duration: 5000 },
+      );
     }
   }
 
@@ -1202,9 +1310,25 @@ export class GalleryComponent implements OnInit, OnDestroy {
    * frames is the floor because one frame is not a set.
    */
   protected async markAsPanorama(kind: SequenceKind): Promise<void> {
+    // Unlike the flag mutations, this one keeps its path list: the server caps
+    // the correction at MARK_SEQUENCE_MAX_PHOTOS frames and there is no
+    // filter-scoped form, because declaring a whole view to be one panorama is
+    // not a thing anyone means.
+    if (this.viewScoped()) {
+      this.snackBar.open(this.i18n.t(I18N.gallery.selection.mark_needs_paths), '', { duration: 4000 });
+      return;
+    }
     const paths = [...this.selectedPaths()];
     if (paths.length < 2) {
       this.snackBar.open(this.i18n.t(I18N.gallery.selection.mark_needs_two), '', { duration: 3000 });
+      return;
+    }
+    if (paths.length > GalleryComponent.MARK_SEQUENCE_MAX_PHOTOS) {
+      this.snackBar.open(
+        this.i18n.t(I18N.gallery.selection.mark_too_many,
+                    { count: paths.length, max: GalleryComponent.MARK_SEQUENCE_MAX_PHOTOS }),
+        '', { duration: 4000 },
+      );
       return;
     }
     try {
@@ -1277,17 +1401,25 @@ export class GalleryComponent implements OnInit, OnDestroy {
       case 'compare': await this.compareSelection(); break;
       case 'export': this.openExportDialog(); break;
       case 'cull': await this.openCullDialog(); break;
-      case 'copy': this.copyPaths(); break;
+      case 'copy': await this.copyPaths(); break;
       case 'mark-panorama': await this.markAsPanorama(action.sequenceKind); break;
       case 'download': await this.downloadSelected(action.type, action.profile); break;
     }
   }
 
   protected async downloadSelected(type = 'original', profile?: string): Promise<void> {
+    const paths = await this.resolveSelectionPaths();
+    if (!paths?.length) return;
+    // One blob fetch and one synthetic anchor click per photo, serially: past a
+    // few dozen that is a browser-melting amount of work to start by accident,
+    // and both "Keep top N%" and a whole-view selection reach thousands.
+    if (paths.length > GalleryComponent.DOWNLOAD_CONFIRM_PHOTOS && !await this.confirmDownload(paths.length)) {
+      return;
+    }
     this.downloading.set(true);
     try {
       await downloadAll(
-        [...this.selectedPaths()],
+        paths,
         path => this.api.downloadUrl(path, type, profile),
         url => this.api.getRaw(url),
       );
@@ -1296,13 +1428,25 @@ export class GalleryComponent implements OnInit, OnDestroy {
     }
   }
 
+  private async confirmDownload(count: number): Promise<boolean> {
+    const ref = this.dialog.open(ConfirmDialogComponent, {
+      data: {
+        title: this.i18n.t(I18N.gallery.selection.download_confirm_title, { count }),
+        message: this.i18n.t(I18N.gallery.selection.download_confirm_message, { count }),
+      },
+    });
+    return !!await firstValueFrom(ref.afterClosed());
+  }
+
   protected openAlbumScoped(path: string, albumId: number): void {
     void this.router.navigate([path], { queryParams: { album: albumId } });
   }
 
   async addToAlbum(albumId: number): Promise<void> {
-    const paths = [...this.selectedPaths()];
-    if (!paths.length) return;
+    // No filter-scoped form server-side, so a whole-view selection resolves to
+    // paths here rather than adding nothing at all.
+    const paths = await this.resolveSelectionPaths();
+    if (!paths?.length) return;
     await firstValueFrom(this.albumService.addPhotos(albumId, paths));
     this.snackBar.open(this.i18n.t(I18N.albums.photos_added), '', { duration: 2000 });
     this.clearSelection();
@@ -1328,22 +1472,34 @@ export class GalleryComponent implements OnInit, OnDestroy {
 
   openExportDialog(): void {
     const albumId = this.route.snapshot.paramMap.get('albumId');
+    if (albumId) {
+      this.dialog.open(ExportEditorDialogComponent, { width: '420px', data: { albumId: +albumId } });
+      return;
+    }
+    // Under view scope the dialog gets the filter, not a path list, so the
+    // export is not bounded by the endpoint's 10,000-path cap.
     this.dialog.open(ExportEditorDialogComponent, {
       width: '420px',
-      data: albumId
-        ? { albumId: +albumId }
+      data: this.viewScoped()
+        ? { filters: this.store.filterPayload(), exclude: [...this.excludedPaths()], count: this.selectionCount() }
         : { paths: [...this.selectedPaths()] },
     });
   }
 
   async openCullDialog(): Promise<void> {
+    const viewScoped = this.viewScoped();
     const paths = [...this.selectedPaths()];
-    if (!paths.length) return;
+    if (!viewScoped && !paths.length) return;
     const { CullDialogComponent } = await import('./cull-dialog.component');
     const ref = this.dialog.open(CullDialogComponent, {
       width: '32rem',
       data: {
         paths,
+        // Same trade as the export: the filter travels instead of the paths, so
+        // a whole-view cull is not bounded by the endpoint's 10,000-path cap.
+        filters: viewScoped ? this.store.filterPayload() : null,
+        exclude: viewScoped ? [...this.excludedPaths()] : [],
+        count: this.selectionCount(),
         trashAvailable: this.store.config()?.cull?.trash_available ?? false,
         allowTrash: this.store.config()?.cull?.allow_trash ?? false,
       },

@@ -62,6 +62,8 @@ INTERFACE_SOURCES = {
     'PhotoSet': CLIENT_SRC / 'shared' / 'models' / 'photo.model.ts',
     'PhotoSetMember': CLIENT_SRC / 'shared' / 'models' / 'photo.model.ts',
     'PhotosResponse': CLIENT_SRC / 'features' / 'gallery' / 'gallery.store.ts',
+    'PhotoCountResponse': CLIENT_SRC / 'features' / 'gallery' / 'gallery.store.ts',
+    'PhotoPathsResponse': CLIENT_SRC / 'features' / 'gallery' / 'gallery.store.ts',
     'ReleaseCheck': CLIENT_SRC / 'app.ts',
 }
 
@@ -293,6 +295,52 @@ class TestPhotoSetContract:
             assert_satisfies(member, 'PhotoSetMember', 'GET /api/photo/set members[]')
 
 
+class TestWholeViewSelectionContract:
+    """GET /api/photos/count and /api/photos/paths — the whole-view selection pair.
+
+    The gallery paginates, so the client's "select all" could only cover the
+    pages it had fetched (issue #126). These two answer for the whole filter
+    set, and the client reads ``total`` and ``paths`` unconditionally, so a
+    rename or a retype on either is exactly the class of break this file exists
+    to catch. Driven with ``path_prefix`` so the assertions are about the
+    seeded rows rather than whatever else lives in the shared session database.
+    """
+
+    def test_count_satisfies_photo_count_response(self, edition_client, seeded):
+        resp = edition_client.get('/api/photos/count', params={'path_prefix': PREFIX})
+        assert resp.status_code == 200
+        assert_satisfies(resp.json(), 'PhotoCountResponse', 'GET /api/photos/count')
+
+    def test_paths_satisfies_photo_paths_response(self, edition_client, seeded):
+        resp = edition_client.get('/api/photos/paths', params={'path_prefix': PREFIX})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert_satisfies(body, 'PhotoPathsResponse', 'GET /api/photos/paths')
+        assert PHOTO in body['paths'], "seeded photo is missing from the whole-view path set"
+        assert body['total'] == len(body['paths']), (
+            "total and paths disagree; total must be len(paths), never a cached count"
+        )
+
+    def test_the_pair_agrees_with_the_gallery_listing(self, edition_client, seeded):
+        """The contract that matters most: the same rows the grid renders.
+
+        A selection built from a different row set than the one on screen is
+        the bug, whatever the payload shape says.
+        """
+        params = {'path_prefix': PREFIX, 'per_page': 50}
+        listing = edition_client.get('/api/photos', params=params)
+        assert listing.status_code == 200
+        grid = {p['path'] for p in listing.json()['photos']}
+
+        paths = edition_client.get('/api/photos/paths', params=params)
+        assert paths.status_code == 200
+        assert set(paths.json()['paths']) == grid
+
+        count = edition_client.get('/api/photos/count', params=params)
+        assert count.status_code == 200
+        assert count.json()['total'] == len(grid)
+
+
 class TestSearchContract:
     """GET /api/search — text scope only, so the check never needs a loaded CLIP/SigLIP model.
 
@@ -503,6 +551,8 @@ class TestTheContractIsActuallyChecked:
     @pytest.mark.parametrize('interface,minimum', [
         ('Photo', 25),
         ('PhotosResponse', 5),
+        ('PhotoCountResponse', 1),
+        ('PhotoPathsResponse', 2),
         ('PhotoSet', 5),
         ('PhotoSetMember', 3),
         ('ReleaseCheck', 5),

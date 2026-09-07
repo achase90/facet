@@ -49,11 +49,43 @@ export interface PhotosResponse {
   hidden_summary?: HiddenSummary;
 }
 
+/** How many photos the current filters match, across every page. */
+export interface PhotoCountResponse {
+  total: number;
+}
+
+/** Every path the current filters match — uncapped and unordered. */
+export interface PhotoPathsResponse {
+  total: number;
+  paths: string[];
+}
+
 /** Pre-mutation flag state, used to revert optimistic updates and power undo. */
 export interface PhotoFlagSnapshot {
   is_favorite: boolean;
   is_rejected: boolean;
   star_rating: number | null;
+}
+
+/**
+ * What a selection names.
+ *
+ * `'paths'` is an explicit list of photo paths. `'view'` is every row the
+ * current filters match — the client never enumerates it, so it stays exact
+ * however far past the loaded pages the view runs.
+ */
+export type SelectionScope = 'paths' | 'view';
+
+/** Outcome of a batch mutation: what it touched, and what the server changed. */
+export interface BatchResult {
+  /** Pre-mutation flags for the photos the client could capture — LOADED ones
+   *  only. Smaller than `targeted` whenever the action reached past the page,
+   *  which is exactly when undo must not be offered. */
+  snapshot: Map<string, PhotoFlagSnapshot>;
+  /** How many photos the action was aimed at, as the client understood it. */
+  targeted: number;
+  /** How many rows the server reports it changed. */
+  count: number;
 }
 
 export interface TypeCount {
@@ -235,15 +267,63 @@ export class GalleryStore {
   }
 
   // --- Selection state (store-level so it survives navigation and is visible to services) ---
+  //
+  // Two scopes, because the gallery paginates. A 'paths' selection names
+  // photos, so it deliberately survives navigation and filter changes. A 'view'
+  // selection names the VIEW: nothing is enumerated, mutations send the filter
+  // and the server derives the rows, which is what makes "select all" mean all
+  // 650 rather than the 64 fetched so far. `excludedPaths` carries the few the
+  // user then unticked.
   readonly selectedPaths = signal<Set<string>>(new Set());
-  readonly selectionCount = computed(() => this.selectedPaths().size);
+  readonly selectionScope = signal<SelectionScope>('paths');
+  /** Photos unticked out of a 'view'-scoped selection. Always empty under 'paths'. */
+  readonly excludedPaths = signal<Set<string>>(new Set());
   private lastSelectedIndex = -1;
 
-  /** Toggle a photo's selection; shift-click extends from the last selected index. */
+  readonly selectionCount = computed(() =>
+    this.selectionScope() === 'view'
+      ? Math.max(0, this.total() - this.excludedPaths().size)
+      : this.selectedPaths().size,
+  );
+
+  /** True while the selection means "every photo the current filters match". */
+  readonly viewScopeSelected = computed(() => this.selectionScope() === 'view');
+
+  /**
+   * Whether the current view can be handed to the server AS a filter.
+   *
+   * `similar_to` and `semanticQuery` rank server-side outside the gallery's
+   * WHERE clause: no filter payload reproduces them, so a 'view'-scoped
+   * selection under either would quietly stand for a different set of photos
+   * than the one on screen. Select-all falls back to the loaded photos there —
+   * a shortcut that does less is still better than one that no-ops.
+   */
+  readonly canScopeSelectionToView = computed(() => {
+    const f = this.filters();
+    return !f.similar_to && !f.semanticQuery;
+  });
+
+  /** The loaded photos the selection covers, in grid order — either scope. */
+  readonly selectedLoadedPaths = computed(() => {
+    if (this.selectionScope() === 'view') {
+      const excluded = this.excludedPaths();
+      return this.photos().filter(p => !excluded.has(p.path)).map(p => p.path);
+    }
+    const selected = this.selectedPaths();
+    return this.photos().filter(p => selected.has(p.path)).map(p => p.path);
+  });
+
+  /**
+   * Toggle a photo's selection; shift-click extends from the last selected index.
+   *
+   * Under 'view' scope the sets are mirrored: everything is already selected,
+   * so what a click builds is the EXCLUSION list.
+   */
   toggleSelection(photo: Photo, event?: MouseEvent): void {
     const photos = this.photos();
     const clickedIndex = photos.findIndex(p => p.path === photo.path);
-    const next = new Set(this.selectedPaths());
+    const target = this.selectionScope() === 'view' ? this.excludedPaths : this.selectedPaths;
+    const next = new Set(target());
 
     if (event?.shiftKey && this.lastSelectedIndex >= 0 && clickedIndex >= 0) {
       const start = Math.min(this.lastSelectedIndex, clickedIndex);
@@ -258,24 +338,72 @@ export class GalleryStore {
     }
 
     if (clickedIndex >= 0) this.lastSelectedIndex = clickedIndex;
-    this.selectedPaths.set(next);
-  }
-
-  /** Select every currently loaded photo. */
-  selectAllLoaded(): void {
-    this.selectedPaths.set(new Set(this.photos().map(p => p.path)));
+    target.set(next);
   }
 
   /**
-   * Swap the selection for its complement over the loaded photos.
+   * Select everything.
    *
-   * Deliberately bounded to what is loaded, like `selectAllLoaded`: inverting
-   * across the whole filtered set would silently select photos the user cannot
-   * see, which is the opposite of what "show me what I am about to reject" asks
-   * for. Pick the keepers, invert, reject.
+   * From an EMPTY selection that means the whole filtered view, and it costs no
+   * request: the filter set the grid was already fetched with is the selection.
+   * From a partial one it widens to the loaded photos only — which is what the
+   * button in the selection bar reads as — and the bar then offers the
+   * escalation to the whole view explicitly rather than taking it silently.
+   */
+  selectAll(): void {
+    // Already view-scoped: "select all" can only mean re-ticking whatever was
+    // unticked. Falling through would DESELECT the view down to the loaded page.
+    const meansEverything = this.selectionScope() === 'view' || this.selectionCount() === 0;
+    if (meansEverything && this.canScopeSelectionToView()) {
+      this.selectWholeView();
+      return;
+    }
+    this.selectAllLoaded();
+  }
+
+  /** Select every currently loaded photo, as an explicit path set. */
+  selectAllLoaded(): void {
+    this.selectionScope.set('paths');
+    this.excludedPaths.set(new Set());
+    this.selectedPaths.set(new Set(this.photos().map(p => p.path)));
+  }
+
+  /** Select the whole filtered view without enumerating it. Makes no request. */
+  selectWholeView(): void {
+    this.selectedPaths.set(new Set());
+    this.excludedPaths.set(new Set());
+    this.selectionScope.set('view');
+    this.lastSelectedIndex = -1;
+  }
+
+  /**
+   * Swap the selection for its complement. Three cases, none of them a request:
+   *
+   * - Empty selection: the complement of nothing is everything, and everything
+   *   is the filter — not the page of it that happens to be loaded. This is the
+   *   case the old "deliberately bounded to what is loaded" note got wrong once
+   *   the view outgrew a page.
+   * - 'view' scope: the complement of "all but these" is "these", which the
+   *   exclusion list already spells out exactly.
+   * - A partial 'paths' selection: the complement over the LOADED photos, and
+   *   still deliberately bounded there. Inverting a hand-picked keep list is
+   *   the "pick the keepers, invert, reject" move, and it must not reach photos
+   *   the user never looked at.
    */
   invertSelection(): void {
+    if (this.selectionScope() === 'view') {
+      const excluded = this.excludedPaths();
+      this.selectionScope.set('paths');
+      this.excludedPaths.set(new Set());
+      this.selectedPaths.set(new Set(excluded));
+      this.lastSelectedIndex = -1;
+      return;
+    }
     const selected = this.selectedPaths();
+    if (selected.size === 0 && this.canScopeSelectionToView()) {
+      this.selectWholeView();
+      return;
+    }
     this.selectedPaths.set(new Set(
       this.photos().filter(p => !selected.has(p.path)).map(p => p.path),
     ));
@@ -284,12 +412,91 @@ export class GalleryStore {
 
   clearSelection(): void {
     this.selectedPaths.set(new Set());
+    this.excludedPaths.set(new Set());
+    this.selectionScope.set('paths');
+    this.lastSelectedIndex = -1;
+  }
+
+  /**
+   * Drop a 'view'-scoped selection.
+   *
+   * A path selection survives a filter change on purpose: it names photos, and
+   * photos do not move. A view selection names the view, so the moment the
+   * filters change it stands for a different set of photos — and the next batch
+   * action would send the NEW filter. Called from loadPhotos(), which every
+   * filter change goes through; pagination (nextPage) deliberately does not,
+   * since appending a page does not change what the view is.
+   */
+  private resetViewScope(): void {
+    if (this.selectionScope() !== 'view') return;
+    this.selectedPaths.set(new Set());
+    this.excludedPaths.set(new Set());
+    this.selectionScope.set('paths');
     this.lastSelectedIndex = -1;
   }
 
   /** Restore a previously captured selection (used by undo). */
   restoreSelection(paths: Iterable<string>): void {
+    this.selectionScope.set('paths');
+    this.excludedPaths.set(new Set());
     this.selectedPaths.set(new Set(paths));
+  }
+
+  /**
+   * The current view as the filter payload the server accepts in place of a
+   * path list. Null when the view cannot be expressed as one.
+   *
+   * Every value is stringified because this same shape travels as a query
+   * string on `GET /photos`, where `ApiService` runs it through `String()` —
+   * and the server's `GalleryParams` types the hide toggles as `str`, so a raw
+   * JSON `true` in a POST body would 422 where `'true'` parses.
+   */
+  filterPayload(): Record<string, string> | null {
+    if (!this.canScopeSelectionToView()) return null;
+    const params = buildApiParams(this.filters(), this.currentAlbum()?.is_smart ?? false);
+    return Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]));
+  }
+
+  /**
+   * How many photos the current filters match, across every page.
+   *
+   * Asked of the server rather than read off `total()`: a whole-view mutation
+   * is about to change rows the user cannot see, so the number it is confirmed
+   * against must not be whichever page response happened to land last.
+   */
+  async countInView(): Promise<number | null> {
+    const params = this.filterPayload();
+    if (!params) return null;
+    try {
+      const res = await firstValueFrom(this.api.get<PhotoCountResponse>('/photos/count', params));
+      return res.total;
+    } catch {
+      this.notifyActionFailed();
+      return null;
+    }
+  }
+
+  /**
+   * Every path the current filters match, minus the excluded ones.
+   *
+   * The on-demand escape hatch for the two actions that genuinely need strings
+   * client-side (copy filenames, download) — never for selection, which is the
+   * whole point of the 'view' scope: this costs one uncapped response covering
+   * the entire filtered set.
+   */
+  async pathsInView(): Promise<string[] | null> {
+    const params = this.filterPayload();
+    if (!params) return null;
+    try {
+      const res = await firstValueFrom(
+        this.api.get<PhotoPathsResponse>('/photos/paths', params),
+      );
+      const excluded = this.excludedPaths();
+      return res.paths.filter(p => !excluded.has(p));
+    } catch {
+      this.notifyActionFailed();
+      return null;
+    }
   }
 
   // Filter options
@@ -431,6 +638,7 @@ export class GalleryStore {
   /** Load photos based on current filters (replaces list) */
   async loadPhotos(): Promise<void> {
     // Always load from page 1 — only nextPage() uses page > 1
+    this.resetViewScope();
     this.filters.update(current => ({ ...current, page: 1 }));
     const seq = ++this._loadSeq;
     this.photos.set([]);
@@ -894,37 +1102,66 @@ export class GalleryStore {
   }
 
   /**
-   * Batch favorite multiple photos. Optimistic with revert on error.
-   * Returns the pre-mutation snapshot for undo, or null on failure.
+   * The wire shape naming the photos a batch mutation acts on.
+   *
+   * Exactly one of the two forms, which is also what the server enforces:
+   * `photo_paths` for a path selection (capped at 1000 there), or the filter
+   * the grid itself was fetched with plus the unticked photos, from which the
+   * server derives the rows — no path list on the wire, and no cap.
    */
-  async batchFavorite(paths: string[]): Promise<Map<string, PhotoFlagSnapshot> | null> {
-    const snap = this.snapshotFlags(paths);
-    this.patchPhotos(new Set(paths), { is_favorite: true, is_rejected: false });
+  private batchTarget(paths: string[]): Record<string, unknown> {
+    const filters = this.selectionScope() === 'view' ? this.filterPayload() : null;
+    if (!filters) return { photo_paths: paths };
+    return { filters, exclude: [...this.excludedPaths()] };
+  }
+
+  /**
+   * Run one batch mutation: patch the loaded photos optimistically, post, and
+   * report what it touched.
+   *
+   * The optimistic patch and the snapshot only ever cover LOADED photos — the
+   * others are not on screen to patch and have no state to remember. That gap
+   * is why `BatchResult` carries `targeted` as well: a caller offering undo has
+   * to know the snapshot is partial, rather than infer coverage from its size.
+   */
+  private async runBatch(
+    paths: string[],
+    endpoint: string,
+    patch: Partial<Photo>,
+    extraBody: Record<string, unknown> = {},
+  ): Promise<BatchResult | null> {
+    const targeted = this.selectionScope() === 'view' ? this.selectionCount() : paths.length;
+    const loaded = this.selectionScope() === 'view' ? this.selectedLoadedPaths() : paths;
+    const snapshot = this.snapshotFlags(loaded);
+    this.patchPhotos(new Set(loaded), patch);
     try {
-      await firstValueFrom(this.api.post('/photos/batch_favorite', { photo_paths: paths }));
-      return snap;
+      const res = await firstValueFrom(
+        this.api.post<{ count?: number }>(endpoint, { ...this.batchTarget(paths), ...extraBody }),
+      );
+      return { snapshot, targeted, count: res?.count ?? targeted };
     } catch {
-      this.revertSnapshot(snap);
+      this.revertSnapshot(snapshot);
       this.notifyActionFailed();
       return null;
     }
   }
 
   /**
-   * Batch reject multiple photos. Optimistic with revert on error.
-   * Returns the pre-mutation snapshot for undo, or null on failure.
+   * Batch favorite multiple photos. Optimistic with revert on error.
+   * Returns what the action touched for undo, or null on failure.
    */
-  async batchReject(paths: string[]): Promise<Map<string, PhotoFlagSnapshot> | null> {
-    const snap = this.snapshotFlags(paths);
-    this.patchPhotos(new Set(paths), { is_rejected: true, is_favorite: false, star_rating: null });
-    try {
-      await firstValueFrom(this.api.post('/photos/batch_reject', { photo_paths: paths }));
-      return snap;
-    } catch {
-      this.revertSnapshot(snap);
-      this.notifyActionFailed();
-      return null;
-    }
+  async batchFavorite(paths: string[]): Promise<BatchResult | null> {
+    return this.runBatch(paths, '/photos/batch_favorite', { is_favorite: true, is_rejected: false });
+  }
+
+  /**
+   * Batch reject multiple photos. Optimistic with revert on error.
+   * Returns what the action touched for undo, or null on failure.
+   */
+  async batchReject(paths: string[]): Promise<BatchResult | null> {
+    return this.runBatch(
+      paths, '/photos/batch_reject', { is_rejected: true, is_favorite: false, star_rating: null },
+    );
   }
 
   /**
@@ -949,7 +1186,7 @@ export class GalleryStore {
           '/photos/select_bottom_percent', { ...params, keep_percent: keepPercent },
         ),
       );
-      this.selectedPaths.set(new Set(res.paths));
+      this.restoreSelection(res.paths);
       return res;
     } catch {
       this.notifyActionFailed();
@@ -959,19 +1196,10 @@ export class GalleryStore {
 
   /**
    * Batch set rating for multiple photos. Optimistic with revert on error.
-   * Returns the pre-mutation snapshot for undo, or null on failure.
+   * Returns what the action touched for undo, or null on failure.
    */
-  async batchRating(paths: string[], rating: number): Promise<Map<string, PhotoFlagSnapshot> | null> {
-    const snap = this.snapshotFlags(paths);
-    this.patchPhotos(new Set(paths), { star_rating: rating || null });
-    try {
-      await firstValueFrom(this.api.post('/photos/batch_rating', { photo_paths: paths, rating }));
-      return snap;
-    } catch {
-      this.revertSnapshot(snap);
-      this.notifyActionFailed();
-      return null;
-    }
+  async batchRating(paths: string[], rating: number): Promise<BatchResult | null> {
+    return this.runBatch(paths, '/photos/batch_rating', { star_rating: rating || null }, { rating });
   }
 
   /** Run up to `limit` path-keyed async tasks concurrently. Returns the paths whose task rejected. */

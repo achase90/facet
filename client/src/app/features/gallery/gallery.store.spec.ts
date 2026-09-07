@@ -1029,12 +1029,16 @@ describe('GalleryStore', () => {
 
 describe('GalleryStore selection', () => {
   let store: GalleryStore;
+  let apiGet: Mock;
+  let apiPost: Mock;
 
   beforeEach(() => {
+    apiGet = vi.fn(() => of(makePhotosResponse()));
+    apiPost = vi.fn(() => of({}));
     TestBed.configureTestingModule({
       providers: [
         GalleryStore,
-        { provide: ApiService, useValue: { get: vi.fn(), post: vi.fn(() => of({})) } },
+        { provide: ApiService, useValue: { get: apiGet, post: apiPost } },
         { provide: Router, useValue: { navigate: vi.fn() } },
         { provide: ActivatedRoute, useValue: { snapshot: { queryParams: {} } } },
         { provide: AuthService, useValue: { isEdition: vi.fn(() => false) } },
@@ -1050,6 +1054,9 @@ describe('GalleryStore selection', () => {
       makePhoto({ path: '/c.jpg' }),
       makePhoto({ path: '/d.jpg' }),
     ]);
+    // Four rows on screen out of a 650-row view: the whole point of the
+    // 'view' scope is that those two numbers differ.
+    store.total.set(650);
   });
 
   it('toggles a single photo', () => {
@@ -1065,21 +1072,27 @@ describe('GalleryStore selection', () => {
     expect([...store.selectedPaths()].sort()).toEqual(['/a.jpg', '/b.jpg', '/c.jpg']);
   });
 
-  it('selectAllLoaded selects every loaded photo', () => {
+  it('selectAllLoaded selects every loaded photo as an explicit path set', () => {
     store.selectAllLoaded();
     expect(store.selectionCount()).toBe(4);
+    expect(store.selectionScope()).toBe('paths');
+    expect([...store.selectedPaths()].sort()).toEqual(['/a.jpg', '/b.jpg', '/c.jpg', '/d.jpg']);
   });
 
-  it('selectAllLoaded is idempotent', () => {
+  it('selectAllLoaded is idempotent, and stays on the loaded photos', () => {
     store.selectAllLoaded();
     store.selectAllLoaded();
     expect(store.selectionCount()).toBe(4);
+    expect(store.selectionScope()).toBe('paths');
   });
 
-  it('clearSelection empties the set and resets range anchor', () => {
-    store.selectAllLoaded();
+  it('clearSelection empties both sets, returns to path scope and resets the anchor', () => {
+    store.selectWholeView();
+    store.toggleSelection(store.photos()[0]);
     store.clearSelection();
     expect(store.selectionCount()).toBe(0);
+    expect(store.selectionScope()).toBe('paths');
+    expect(store.excludedPaths().size).toBe(0);
     store.toggleSelection(store.photos()[2], { shiftKey: true } as MouseEvent);
     expect([...store.selectedPaths()]).toEqual(['/c.jpg']);
   });
@@ -1087,6 +1100,7 @@ describe('GalleryStore selection', () => {
   it('restoreSelection rehydrates a saved set', () => {
     store.restoreSelection(['/a.jpg', '/d.jpg']);
     expect([...store.selectedPaths()].sort()).toEqual(['/a.jpg', '/d.jpg']);
+    expect(store.selectionScope()).toBe('paths');
   });
 
   it('invertSelection swaps the selection for its complement', () => {
@@ -1094,11 +1108,6 @@ describe('GalleryStore selection', () => {
     store.toggleSelection(store.photos()[2]);
     store.invertSelection();
     expect([...store.selectedPaths()].sort()).toEqual(['/b.jpg', '/d.jpg']);
-  });
-
-  it('invertSelection on an empty selection selects everything', () => {
-    store.invertSelection();
-    expect(store.selectionCount()).toBe(4);
   });
 
   it('invertSelection twice returns the original selection', () => {
@@ -1113,6 +1122,264 @@ describe('GalleryStore selection', () => {
     store.invertSelection();
     store.toggleSelection(store.photos()[2], { shiftKey: true } as MouseEvent);
     expect([...store.selectedPaths()].sort()).toEqual(['/b.jpg', '/d.jpg']);
+  });
+
+  describe('whole-view scope', () => {
+    it('select-all on an empty selection covers the view, not the loaded page', () => {
+      store.selectAll();
+
+      expect(store.selectionScope()).toBe('view');
+      expect(store.selectionCount()).toBe(650);
+    });
+
+    // The whole feature: the filter the grid was already fetched with IS the
+    // selection, so declaring it costs nothing.
+    it('makes no request to do it', () => {
+      store.selectAll();
+
+      expect(apiGet).not.toHaveBeenCalled();
+      expect(apiPost).not.toHaveBeenCalled();
+    });
+
+    // Was 'invertSelection on an empty selection selects everything', where
+    // "everything" meant the four loaded rows.
+    it('invertSelection on an empty selection covers the view too, still without a request', () => {
+      store.invertSelection();
+
+      expect(store.selectionScope()).toBe('view');
+      expect(store.selectionCount()).toBe(650);
+      expect(apiGet).not.toHaveBeenCalled();
+    });
+
+    it('select-all over an existing view selection re-ticks what was unticked', () => {
+      store.selectWholeView();
+      store.toggleSelection(store.photos()[1]);
+
+      store.selectAll();
+
+      expect(store.selectionScope()).toBe('view');
+      expect(store.excludedPaths().size).toBe(0);
+      expect(store.selectionCount()).toBe(650);
+    });
+
+    it('select-all from a PARTIAL selection stays on the loaded photos', () => {
+      store.toggleSelection(store.photos()[0]);
+
+      store.selectAll();
+
+      expect(store.selectionScope()).toBe('paths');
+      expect(store.selectionCount()).toBe(4);
+    });
+
+    it('counts the view minus what the user unticked', () => {
+      store.selectWholeView();
+
+      store.toggleSelection(store.photos()[1]);
+
+      expect([...store.excludedPaths()]).toEqual(['/b.jpg']);
+      expect(store.selectedPaths().size).toBe(0);
+      expect(store.selectionCount()).toBe(649);
+    });
+
+    it('re-ticking an unticked photo puts it back', () => {
+      store.selectWholeView();
+      store.toggleSelection(store.photos()[1]);
+
+      store.toggleSelection(store.photos()[1]);
+
+      expect(store.excludedPaths().size).toBe(0);
+      expect(store.selectionCount()).toBe(650);
+    });
+
+    it('shift-click unticks a whole range', () => {
+      store.selectWholeView();
+
+      store.toggleSelection(store.photos()[0]);
+      store.toggleSelection(store.photos()[2], { shiftKey: true } as MouseEvent);
+
+      expect([...store.excludedPaths()].sort()).toEqual(['/a.jpg', '/b.jpg', '/c.jpg']);
+      expect(store.selectionCount()).toBe(647);
+    });
+
+    it('inverting it yields exactly what was unticked, with no round trip', () => {
+      store.selectWholeView();
+      store.toggleSelection(store.photos()[1]);
+
+      store.invertSelection();
+
+      expect(store.selectionScope()).toBe('paths');
+      expect([...store.selectedPaths()]).toEqual(['/b.jpg']);
+      expect(store.excludedPaths().size).toBe(0);
+      expect(apiGet).not.toHaveBeenCalled();
+    });
+
+    it('a filter change drops it — the view it named is gone', async () => {
+      store.selectWholeView();
+      apiGet.mockReturnValue(of(makePhotosResponse({ total: 12 })));
+
+      await store.updateFilter('camera', 'Canon');
+
+      expect(store.selectionScope()).toBe('paths');
+      expect(store.selectionCount()).toBe(0);
+    });
+
+    it('survives paging — appending a page does not change what the view IS', async () => {
+      store.selectWholeView();
+      store.hasMore.set(true);
+      apiGet.mockReturnValue(of(makePhotosResponse({ total: 650, has_more: true })));
+
+      await store.nextPage();
+
+      expect(store.selectionScope()).toBe('view');
+    });
+
+    // Both rank server-side outside the gallery WHERE clause, so no filter
+    // payload reproduces them. Falling back to the loaded photos beats a
+    // shortcut that does nothing at all.
+    it('falls back to the loaded photos under a similarity view', () => {
+      store.filters.update(f => ({ ...f, similar_to: '/x.jpg' }));
+
+      store.selectAll();
+
+      expect(store.selectionScope()).toBe('paths');
+      expect(store.selectionCount()).toBe(4);
+      expect(apiGet).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the loaded photos under a semantic search', () => {
+      store.filters.update(f => ({ ...f, semanticQuery: 'sunset' }));
+
+      store.invertSelection();
+
+      expect(store.selectionScope()).toBe('paths');
+      expect(store.selectionCount()).toBe(4);
+      expect(apiGet).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resolving a whole-view selection to numbers and paths', () => {
+    it('countInView asks the server rather than trusting the last page response', async () => {
+      apiGet.mockReturnValue(of({ total: 650 }));
+
+      expect(await store.countInView()).toBe(650);
+      expect(apiGet).toHaveBeenCalledWith('/photos/count', expect.objectContaining({ page: '1' }));
+    });
+
+    it('pathsInView drops the unticked photos', async () => {
+      store.selectWholeView();
+      store.toggleSelection(store.photos()[0]);
+      apiGet.mockReturnValue(of({ total: 3, paths: ['/a.jpg', '/b.jpg', '/c.jpg'] }));
+
+      expect(await store.pathsInView()).toEqual(['/b.jpg', '/c.jpg']);
+    });
+
+    it('both refuse a view that cannot be expressed as a filter', async () => {
+      store.filters.update(f => ({ ...f, similar_to: '/x.jpg' }));
+
+      expect(await store.countInView()).toBeNull();
+      expect(await store.pathsInView()).toBeNull();
+      expect(apiGet).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('GalleryStore batch mutations by selection scope', () => {
+  let store: GalleryStore;
+  let apiPost: Mock;
+
+  beforeEach(() => {
+    apiPost = vi.fn(() => of({ success: true, count: 2 }));
+    TestBed.configureTestingModule({
+      providers: [
+        GalleryStore,
+        { provide: ApiService, useValue: { get: vi.fn(() => of(makePhotosResponse())), post: apiPost } },
+        { provide: Router, useValue: { navigate: vi.fn() } },
+        { provide: ActivatedRoute, useValue: { snapshot: { queryParams: {} } } },
+        { provide: AuthService, useValue: { isEdition: vi.fn(() => false) } },
+        { provide: AlbumService, useValue: { list: vi.fn(() => of({ albums: [] })), update: vi.fn(() => of({})) } },
+        { provide: MatSnackBar, useValue: { open: vi.fn() } },
+        { provide: I18nService, useValue: { t: (k: string) => k } },
+      ],
+    });
+    store = TestBed.inject(GalleryStore);
+    store.photos.set([makePhoto({ path: '/a.jpg' }), makePhoto({ path: '/b.jpg' })]);
+    store.total.set(650);
+  });
+
+  const lastBody = () => apiPost.mock.calls.at(-1)![1] as Record<string, unknown>;
+
+  it('sends an explicit path list under path scope', async () => {
+    store.selectAllLoaded();
+
+    await store.batchFavorite(['/a.jpg', '/b.jpg']);
+
+    expect(apiPost).toHaveBeenCalledWith('/photos/batch_favorite', { photo_paths: ['/a.jpg', '/b.jpg'] });
+  });
+
+  it('sends the filter and the exclusions under view scope, never a path list', async () => {
+    store.selectWholeView();
+    store.toggleSelection(store.photos()[0]);
+
+    await store.batchReject([]);
+
+    expect(apiPost.mock.calls.at(-1)![0]).toBe('/photos/batch_reject');
+    // The server takes exactly one target form and 422s on both.
+    expect(lastBody()['photo_paths']).toBeUndefined();
+    expect(lastBody()['exclude']).toEqual(['/a.jpg']);
+  });
+
+  // GalleryParams types the hide toggles as `str`, so a raw JSON `true` --
+  // which is what buildApiParams holds -- would 422 where 'true' parses.
+  it('stringifies the filter values, exactly as the query string does', async () => {
+    store.filters.update(f => ({ ...f, hide_bursts: true, camera: 'Canon' }));
+    store.selectWholeView();
+
+    await store.batchFavorite([]);
+
+    const filters = lastBody()['filters'] as Record<string, unknown>;
+    expect(filters['hide_bursts']).toBe('true');
+    expect(filters['page']).toBe('1');
+    expect(filters['camera']).toBe('Canon');
+  });
+
+  it('carries the rating alongside the filter', async () => {
+    store.selectWholeView();
+
+    await store.batchRating([], 4);
+
+    expect(lastBody()['rating']).toBe(4);
+    expect(lastBody()['filters']).toBeDefined();
+  });
+
+  it('patches the loaded photos optimistically under view scope', async () => {
+    store.selectWholeView();
+    store.toggleSelection(store.photos()[0]);
+
+    await store.batchReject([]);
+
+    expect(store.photos()[0].is_rejected).toBeFalsy(); // unticked
+    expect(store.photos()[1].is_rejected).toBe(true);
+  });
+
+  it('reports how far the action reached versus how much the snapshot covers', async () => {
+    // A "Keep top N%" selection: 5,000 paths, two of them on screen.
+    const paths = ['/a.jpg', ...Array.from({ length: 4999 }, (_, i) => `/p${i}.jpg`)];
+
+    const res = await store.batchReject(paths);
+
+    expect(res!.targeted).toBe(5000);
+    expect(res!.snapshot.size).toBe(1);
+    expect(res!.count).toBe(2); // whatever the server says it changed
+  });
+
+  it('reports the whole view as targeted under view scope', async () => {
+    store.selectWholeView();
+    store.toggleSelection(store.photos()[0]);
+
+    const res = await store.batchFavorite([]);
+
+    expect(res!.targeted).toBe(649);
+    expect(res!.snapshot.size).toBe(1);
   });
 });
 
@@ -1231,18 +1498,18 @@ describe('GalleryStore optimistic mutations', () => {
   });
 
   it('batchReject returns the pre-mutation snapshot on success', async () => {
-    const snap = await store.batchReject(['/a.jpg', '/b.jpg']);
-    expect(snap).not.toBeNull();
-    expect(snap!.get('/a.jpg')).toEqual({ is_favorite: false, is_rejected: false, star_rating: 3 });
-    expect(snap!.get('/b.jpg')).toEqual({ is_favorite: true, is_rejected: false, star_rating: null });
+    const res = await store.batchReject(['/a.jpg', '/b.jpg']);
+    expect(res).not.toBeNull();
+    expect(res!.snapshot.get('/a.jpg')).toEqual({ is_favorite: false, is_rejected: false, star_rating: 3 });
+    expect(res!.snapshot.get('/b.jpg')).toEqual({ is_favorite: true, is_rejected: false, star_rating: null });
     expect(store.photos()[0].is_rejected).toBe(true);
     expect(store.photos()[0].star_rating).toBeNull();
   });
 
   it('batchReject reverts everything and returns null on error', async () => {
     apiPost.mockReturnValue(throwError(() => new Error('boom')));
-    const snap = await store.batchReject(['/a.jpg', '/b.jpg']);
-    expect(snap).toBeNull();
+    const res = await store.batchReject(['/a.jpg', '/b.jpg']);
+    expect(res).toBeNull();
     expect(store.photos()[0].is_rejected).toBe(false);
     expect(store.photos()[0].star_rating).toBe(3);
     expect(store.photos()[1].is_favorite).toBe(true);
