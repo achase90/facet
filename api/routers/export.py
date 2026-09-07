@@ -125,20 +125,20 @@ def _fetch_rating_rows(conn, paths, user_id):
     return {row["path"]: dict(row) for row in rows}
 
 
-def _resolve_filter_paths(conn, filters, user_id):
-    """Resolve a gallery filter set to a list of photo paths."""
-    from api.routers.gallery import _build_gallery_where
+def _resolve_filter_paths(conn, filters, user_id, exclude=None):
+    """Resolve a gallery filter set to a list of photo paths.
 
-    where_clauses, sql_params = _build_gallery_where(filters or {}, conn, user_id=user_id)
-    from_clause, from_params = get_photos_from_clause(user_id)
-    where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-    # Parameterized: from_clause is a fixed string and every where clause built by
-    # _build_gallery_where carries only ? placeholders (all user values bound in
-    # sql_params); no raw value or column name is ever interpolated. Same assembly
-    # as the main gallery list endpoint (gallery.py).
+    ``gallery_scope_sql`` is the gallery's own definition of "the current
+    view", normalization included, so a filter set that renders one grid
+    resolves here to exactly the rows that grid shows — ``exclude`` aside.
+    Parameterized: only the fixed from-clause and the generated placeholder run
+    are interpolated, every user value stays a ``?`` bind.
+    """
+    from api.routers.gallery import gallery_scope_sql
+
+    from_clause, where_str, params = gallery_scope_sql(conn, filters, user_id, exclude)
     rows = conn.execute(
-        f"SELECT photos.path FROM {from_clause}{where_str}",
-        from_params + sql_params,
+        f"SELECT photos.path FROM {from_clause}{where_str}", params
     ).fetchall()
     return [row["path"] for row in rows]
 

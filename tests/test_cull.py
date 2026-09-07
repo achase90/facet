@@ -278,6 +278,68 @@ _BRACKET = "bracket"
 _PANORAMA = "panorama"
 
 
+class TestCullApplyFilterScope:
+    """The ``filters`` branch must resolve the rows the gallery would show.
+
+    The client used to send an explicit path list here, so this branch was
+    never exercised and its resolver skipped ``_prepare_gallery_params`` -- the
+    step that expands the Photo Type presets. ``type=aerial`` therefore reached
+    ``_build_gallery_where`` as an unknown key, was dropped, and the cull
+    resolved to the WHOLE library view on an endpoint that moves and trashes
+    files.
+    """
+
+    @staticmethod
+    def _categorised_db(tmp_path, rows):
+        """``rows``: (path, category) pairs. Schema from ``init_database``."""
+        db = str(tmp_path / "cat.db")
+        init_database(db)
+        conn = sqlite3.connect(db)
+        for path, category in rows:
+            conn.execute(
+                "INSERT INTO photos (path, filename, category, is_rejected) "
+                "VALUES (?, ?, ?, 0)",
+                (path, os.path.basename(path), category),
+            )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_a_photo_type_preset_narrows_the_cull(self, client, tmp_path):
+        aerial = _make_file(tmp_path, "aerial.jpg")
+        field = _make_file(tmp_path, "field.jpg")
+        street = _make_file(tmp_path, "street.jpg")
+        db = self._categorised_db(tmp_path, [
+            (aerial, "aerial"), (field, "landscape"), (street, "street"),
+        ])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"type": "aerial"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["would_copy"] == [aerial]
+        assert body["matched"] == 1
+
+    def test_a_filter_the_where_builder_knows_still_narrows(self, client, tmp_path):
+        aerial = _make_file(tmp_path, "aerial.jpg")
+        field = _make_file(tmp_path, "field.jpg")
+        db = self._categorised_db(tmp_path, [(aerial, "aerial"), (field, "landscape")])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"category": "landscape"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 200
+        assert resp.json()["would_copy"] == [field]
+
 class TestCullApplySequences:
     def test_copy_keeps_bracket_siblings_reported_and_included_when_flag_on(self, client, tmp_path):
         """A5#1: a 5-frame bracket contributes ONE selected path (the gallery

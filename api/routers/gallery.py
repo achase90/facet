@@ -555,6 +555,45 @@ def _build_gallery_where(params, conn=None, user_id=None):
     return where_clauses, sql_params
 
 
+def gallery_scope_sql(conn, filters, user_id, exclude=None):
+    """``(from_clause, where_str, params)`` for the rows one gallery view shows.
+
+    The single definition of "the current view" for every surface that acts on
+    a whole filter set instead of a page of it — the count/paths endpoints, the
+    filter-scoped batch writes, cull and sidecar export. The filter dict goes
+    through :func:`_prepare_gallery_params` first, exactly like the listing
+    endpoint: it merges the viewer defaults and expands the ``TYPE_FILTERS``
+    presets, so a filter set that renders one gallery cannot resolve to a
+    different row set for a mutation. Skipping that step is what the cull and
+    export paths used to do.
+
+    ``exclude`` removes named paths from the scope, which is how the client's
+    "whole view selected, minus these few" state reaches the server without
+    sending the whole selection.
+
+    ``where_str`` carries its own leading ``" WHERE "`` and is never empty: the
+    visibility clause is unconditional (``1=1`` outside multi-user mode), so
+    callers can concatenate it straight after the FROM clause — including
+    inside an ``INSERT ... SELECT``, whose upsert clause needs a WHERE to parse
+    unambiguously.
+
+    Every user value stays a ``?`` bind param; only the fixed ``from_clause``
+    and the generated placeholder run are interpolated. Raises
+    ``ValidationError`` for a malformed filter set, which callers translate to
+    422.
+    """
+    _, params = _prepare_gallery_params(dict(filters or {}))
+    from_clause, from_params = get_photos_from_clause(user_id)
+    where_clauses, sql_params = _build_gallery_where(params, conn, user_id=user_id)
+    all_params = list(from_params) + list(sql_params)
+    if exclude:
+        placeholders = ','.join('?' * len(exclude))
+        where_clauses.append(f"photos.path NOT IN ({placeholders})")
+        all_params.extend(exclude)
+    where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    return from_clause, where_str, all_params
+
+
 @router.get("/api/photo", response_model=Photo, response_model_exclude_unset=True)
 async def api_photo(
     path: str = Query(...),
@@ -765,6 +804,20 @@ def _resolve_order_by(params: dict) -> str:
 _SELECT_BOTTOM_MAX = 5000
 
 
+async def _scope_for_request(conn, qp, user_id, exclude=None):
+    """The gallery scope for a request, with the album access check applied.
+
+    An album-scoped view must answer 403/404 the same way the listing endpoint
+    does, or "select the whole view" would count rows through an album the
+    caller cannot open.
+    """
+    _, album_params = album_filter_clause(qp.get('album_id'))
+    if album_params:
+        from api.routers.albums import _check_album_access_async
+        await _check_album_access_async(conn, album_params[0], user_id)
+    return gallery_scope_sql(conn, qp, user_id, exclude)
+
+
 @router.get("/api/photos/select_bottom_percent")
 async def api_select_bottom_percent(
     request: Request,
@@ -797,14 +850,7 @@ async def api_select_bottom_percent(
     try:
         async with get_async_db() as conn:
             user_id = user.user_id if user else None
-            _, album_params = album_filter_clause(params.get('album_id'))
-            if album_params:
-                from api.routers.albums import _check_album_access_async
-                await _check_album_access_async(conn, album_params[0], user_id)
-            from_clause, from_params = get_photos_from_clause(user_id)
-            where_clauses, sql_params = _build_gallery_where(params, conn, user_id=user_id)
-            all_params = from_params + sql_params
-            where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            from_clause, where_str, all_params = await _scope_for_request(conn, qp, user_id)
 
             total = await get_cached_count_async(
                 conn, where_str, all_params, from_clause=from_clause
