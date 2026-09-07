@@ -287,6 +287,152 @@ describe('GalleryComponent', () => {
     });
   });
 
+  describe('focus follows the current photo', () => {
+    let grid: HTMLElement;
+    let bar: HTMLButtonElement;
+
+    beforeEach(() => {
+      mockStore.photos.set([{ path: '/a.jpg' }, { path: '/b.jpg' }, { path: '/c.jpg' }]);
+      mockStore.config.set({ features: { show_rating_controls: true } });
+      (mockAuth as { isEdition: unknown }).isEdition = vi.fn(() => true);
+
+      // The component is built without a fixture, so the grid its template
+      // would render is stood up by hand: focusCard looks a card up by its
+      // data-pidx and focuses the first [tabindex] inside it, and the key
+      // handler is bound on the role="grid" ancestor.
+      grid = document.createElement('div');
+      grid.setAttribute('role', 'grid');
+      grid.tabIndex = 0;
+      for (const index of [0, 1, 2]) {
+        const card = document.createElement('div');
+        card.setAttribute('data-pidx', String(index));
+        const tile = document.createElement('div');
+        tile.tabIndex = 0;
+        // jsdom lays nothing out and so implements no scrolling, but focusCard
+        // really does make the call and it has to land somewhere.
+        tile.scrollIntoView = vi.fn();
+        card.appendChild(tile);
+        grid.appendChild(card);
+      }
+      document.body.appendChild(grid);
+
+      // Stands in for the action bar's Clear button: outside the grid, and
+      // about to be unmounted by the very click that put focus on it.
+      bar = document.createElement('button');
+      document.body.appendChild(bar);
+    });
+
+    afterEach(() => {
+      grid.remove();
+      bar.remove();
+    });
+
+    function tileAt(index: number): HTMLElement {
+      return grid.querySelector(`[data-pidx="${index}"] [tabindex]`) as HTMLElement;
+    }
+
+    function activeIndex(): number {
+      return (component as unknown as { activeIndex(): number }).activeIndex();
+    }
+
+    function click(photo: { path: string }, index: number): void {
+      (component as unknown as {
+        toggleSelection(p: unknown, e: MouseEvent | undefined, i: number): void;
+      }).toggleSelection(photo, undefined, index);
+    }
+
+    function clear(): void {
+      (component as unknown as { clearSelection(): void }).clearSelection();
+    }
+
+    function press(key: string): void {
+      const ev = new KeyboardEvent('keydown', { key });
+      Object.defineProperty(ev, 'target', { value: null, configurable: true });
+      (component as unknown as { onGridKeydown(e: KeyboardEvent): void }).onGridKeydown(ev);
+    }
+
+    it('puts the cursor and the focus on the same card when a photo is clicked', () => {
+      click({ path: '/c.jpg' }, 2);
+      expect(activeIndex()).toBe(2);
+      expect(document.activeElement).toBe(tileAt(2));
+      expect(tileAt(2).scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
+    });
+
+    it('hands focus back to the marked photo when the selection is cleared', () => {
+      click({ path: '/b.jpg' }, 1);
+      bar.focus();
+      expect(document.activeElement).toBe(bar);
+
+      clear();
+
+      expect(document.activeElement).toBe(tileAt(1));
+    });
+
+    it('leaves focus somewhere the grid key handler still receives events', () => {
+      // The invariant as the user meets it: a marker is drawn, so the arrow
+      // keys have to work. onGridKeydown is bound on the grid, which makes that
+      // true only while focus is inside one -- and <body> is not.
+      click({ path: '/b.jpg' }, 1);
+      bar.focus();
+      clear();
+
+      const seen: string[] = [];
+      grid.addEventListener('keydown', event => seen.push((event as KeyboardEvent).key));
+      (document.activeElement as HTMLElement)
+        .dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+
+      expect(seen).toEqual(['ArrowRight']);
+    });
+
+    it('keeps the marker and the keystroke target agreeing after a clear', () => {
+      click({ path: '/b.jpg' }, 1);
+      bar.focus();
+      clear();
+
+      expect(activeIndex()).toBe(1);
+      expect(document.activeElement).toBe(tileAt(1));
+      press('3');
+      expect(mockStore.setRating).toHaveBeenCalledWith('/b.jpg', 3);
+    });
+
+    it('brings focus back from a batch action that empties the selection too', async () => {
+      // The Clear button is only the shortest way in. Every batch action ends
+      // the same way, from a control on the same bar.
+      click({ path: '/b.jpg' }, 1);
+      bar.focus();
+
+      await (component as unknown as { batchFavorite(): Promise<void> }).batchFavorite();
+
+      expect(mockStore.clearSelection).toHaveBeenCalled();
+      expect(document.activeElement).toBe(tileAt(1));
+    });
+
+    it('does not re-focus or re-scroll for an Escape that came from the grid', () => {
+      click({ path: '/b.jpg' }, 1);
+      mockStore.selectionCount.set(1);
+      (tileAt(1).scrollIntoView as unknown as Mock).mockClear();
+
+      press('Escape');
+
+      expect(mockStore.clearSelection).toHaveBeenCalled();
+      expect(document.activeElement).toBe(tileAt(1));
+      expect(tileAt(1).scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it('does not chase a cursor a narrower filter has left pointing past the end', () => {
+      // Nothing is marked in that state, so there is no promise to keep, and
+      // the card still standing at that index until the grid re-renders is not
+      // the photo the cursor means.
+      click({ path: '/c.jpg' }, 2);
+      mockStore.photos.set([{ path: '/a.jpg' }]);
+      bar.focus();
+
+      clear();
+
+      expect(document.activeElement).toBe(bar);
+    });
+  });
+
   describe('ngOnInit()', () => {
     it('should call store.loadConfig, loadFilterOptions, loadTypeCounts, and loadPhotos', async () => {
       await component.ngOnInit();

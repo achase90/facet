@@ -60,6 +60,29 @@ const DEFAULT_CLIPPING_BADGE_PERCENT = 5;
   host: {
     role: 'gridcell',
     style: 'content-visibility: auto; contain-intrinsic-size: auto 300px',
+    // Room for the scrollIntoView the grid's keyboard cursor performs on the
+    // card it lands on. That call asks for `block: 'nearest'`, which is the
+    // least scrolling that brings an edge of the card to an edge of the
+    // scrollport and which takes no account of anything drawn over it -- and
+    // the gallery fixes an action bar across the bottom of the viewport for as
+    // long as anything is selected, which is exactly when the arrow keys are in
+    // use. Arrowing downward therefore parked the current card underneath it,
+    // star-rating badge and all, that badge sitting in the bottom-left corner.
+    // The clearance is sized for the tallest case, which is lg: there the
+    // scrollport does run to the bottom of the viewport, and the bar comes to
+    // 61px -- 1px of border, 36px of button at this theme's -1 density, and
+    // 12px of py-3 above and below it -- plus the 6px the marker's own outline
+    // occupies outside the card. Below lg the bar is shorter and the shell
+    // already holds the scrollport 56px clear of the viewport bottom for its
+    // own nav, so the same 5rem merely over-scrolls a little, which shows more
+    // of the next row and costs nothing. One value rather than a binding on
+    // whether the bar is up: scroll-margin is inert until something calls
+    // scrollIntoView, and the only caller runs synchronously inside the keydown
+    // handler, ahead of the change detection that would have to apply a
+    // conditional class. The top asks for nothing but that same outline kept
+    // off the scrollport's edge, since nothing in the shell is fixed or sticky
+    // above the grid.
+    class: 'scroll-mt-2 scroll-mb-20',
     // The current-photo marker, and the dimming of every card that is not it.
     // Both sit on the host rather than on the tile below, because the host's
     // own `content-visibility: auto` brings paint containment with it, and that

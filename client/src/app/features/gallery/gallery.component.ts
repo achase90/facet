@@ -1117,14 +1117,49 @@ export class GalleryComponent implements OnInit, OnDestroy {
    *  expression each call site feeds `data-pidx`, which is what `focusCard`
    *  looks a card up by, so the cursor, the marker and the focus target cannot
    *  drift apart. Deriving it here from the path would be a second answer to a
-   *  question the caller has already answered. */
+   *  question the caller has already answered.
+   *
+   *  Focus is moved explicitly rather than left to the browser. A pointer click
+   *  does land focus on the card by itself, but only because `onSelect` lets
+   *  the default through, and only for a caller that really is a click; saying
+   *  it out loud makes the rule hold for any caller. It is also what lifts the
+   *  newly current card clear of the action bar that this very selection has
+   *  just raised over it. */
   protected toggleSelection(photo: Photo, event: MouseEvent | undefined, index: number): void {
     this.store.toggleSelection(photo, event);
     this.activeIndex.set(index);
+    this.focusCard(index);
   }
 
   protected clearSelection(): void {
     this.store.clearSelection();
+    this.restoreCursorFocus();
+  }
+
+  /** Keep DOM focus wherever the marker is, so that a drawn marker always means
+   *  a live keyboard.
+   *
+   *  `onGridKeydown` is bound on the grid containers, so the arrows and the
+   *  rating keys only reach this component while focus is inside one of them.
+   *  The marker is component state and outlives focus, which is where the two
+   *  come apart: every route that empties the selection is driven from the
+   *  action bar, and the bar unmounts the instant the count reaches zero, so
+   *  the control that was just clicked takes focus down with it and the browser
+   *  falls back to `<body>`. The photo stays framed in tertiary while nothing
+   *  typed at it does anything -- the marker promising a keyboard that is no
+   *  longer listening.
+   *
+   *  Nothing is taken while focus is already inside a grid. That leaves Escape
+   *  alone: it is the one route in from the inside, standing on the very card
+   *  it would be sent to, so handling it here would only re-focus and re-scroll
+   *  a card the user has not left. And nothing is taken when the cursor is not
+   *  on a photo that is actually in the results, because then no marker is
+   *  drawn and there is no promise to keep -- the card still sitting at that
+   *  index until the grid re-renders is not the photo the cursor means. */
+  private restoreCursorFocus(): void {
+    if (!this.hasActivePhoto()) return;
+    if (document.activeElement?.closest('[role="grid"]')) return;
+    this.focusCard(this.activeIndex());
   }
 
   protected selectAll(): void {

@@ -638,4 +638,23 @@ describe('PhotoCardComponent current-photo marker', () => {
   it('keeps the focus-visible outline, which still means genuine keyboard focus', () => {
     expect(tile(createCard({ isActive: true })).className).toContain('focus-visible:outline-2');
   });
+
+  it('reserves room for the frame and for the bar the grid scrolls it under', () => {
+    // The grid moves its cursor with scrollIntoView({ block: 'nearest' }),
+    // which stops at the scrollport's edge and knows nothing of the action bar
+    // fixed across the bottom of it.
+    const classes = host(createCard()).classList;
+    expect(classes.contains('scroll-mb-20')).toBe(true);
+    expect(classes.contains('scroll-mt-2')).toBe(true);
+  });
+
+  it('reserves it whether or not it is the current card', () => {
+    // Deliberately unconditional: scroll-margin does nothing until something
+    // calls scrollIntoView on the card, and the one caller runs inside the
+    // keydown handler, ahead of the change detection a conditional class would
+    // be waiting on.
+    const classes = host(createCard({ isActive: true, gridHasActiveCard: true })).classList;
+    expect(classes.contains('scroll-mb-20')).toBe(true);
+    expect(classes.contains('scroll-mt-2')).toBe(true);
+  });
 });
