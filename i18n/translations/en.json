@@ -2314,6 +2314,8 @@
     "copy_keeps": "Copy keeps to folder",
     "move_rejects": "Move rejects to folder",
     "trash_rejects": "Trash rejects (to OS trash)",
+    "trash_disabled": "Trashing is disabled — an administrator can enable it via viewer.cull.allow_trash.",
+    "trash_missing_pkg": "OS-trash is unavailable on this server — the send2trash package is not installed.",
     "target_dir": "Target folder",
     "include_companions": "Include companion RAW / XMP",
     "include_sequence_siblings": "Include sequence siblings (bracket/panorama frames)",

@@ -11,7 +11,7 @@ describe('CullDialogComponent', () => {
   let post: ReturnType<typeof vi.fn>;
   let dialogClose: ReturnType<typeof vi.fn>;
 
-  function build(paths = ['/a.jpg', '/b.jpg'], trashAvailable?: boolean) {
+  function build(paths = ['/a.jpg', '/b.jpg'], trashAvailable?: boolean, allowTrash?: boolean) {
     post = vi.fn(() => of({ would_copy: paths, skipped: [] }));
     dialogClose = vi.fn();
     TestBed.configureTestingModule({
@@ -20,7 +20,7 @@ describe('CullDialogComponent', () => {
         { provide: MatSnackBar, useValue: { open: vi.fn() } },
         { provide: I18nService, useValue: { t: (k: string) => k } },
         { provide: MatDialogRef, useValue: { close: dialogClose } },
-        { provide: MAT_DIALOG_DATA, useValue: { paths, trashAvailable } },
+        { provide: MAT_DIALOG_DATA, useValue: { paths, trashAvailable, allowTrash } },
       ],
     });
     component = TestBed.runInInjectionContext(() => new CullDialogComponent());
@@ -61,6 +61,49 @@ describe('CullDialogComponent', () => {
   it('includes trash_rejects in actions when trashAvailable is true', () => {
     build(['/a.jpg', '/b.jpg'], true);
     expect(actions()).toContain('trash_rejects');
+  });
+
+  describe('trash availability message', () => {
+    function buildRendered(trashAvailable?: boolean, allowTrash?: boolean) {
+      TestBed.configureTestingModule({
+        imports: [CullDialogComponent],
+        providers: [
+          { provide: ApiService, useValue: { post: vi.fn(() => of({ would_copy: [], skipped: [] })) } },
+          { provide: MatSnackBar, useValue: { open: vi.fn() } },
+          { provide: I18nService, useValue: { t: (k: string) => k, translations: () => ({}) } },
+          { provide: MatDialogRef, useValue: { close: vi.fn() } },
+          { provide: MAT_DIALOG_DATA, useValue: { paths: ['/a.jpg'], trashAvailable, allowTrash } },
+        ],
+      });
+      const fixture = TestBed.createComponent(CullDialogComponent);
+      fixture.detectChanges();
+      return fixture;
+    }
+
+    function paragraphs(fixture: ReturnType<typeof buildRendered>): string[] {
+      return Array.from(fixture.debugElement.nativeElement.querySelectorAll('p'))
+        .map((el) => (el as HTMLElement).textContent?.trim() ?? '');
+    }
+
+    it('shows cull.trash_disabled when the operator has not enabled trashing', () => {
+      const fixture = buildRendered(false, false);
+      expect(paragraphs(fixture)).toContain('cull.trash_disabled');
+    });
+
+    it('shows cull.trash_missing_pkg when enabled but the send2trash package is missing', () => {
+      const fixture = buildRendered(false, true);
+      expect(paragraphs(fixture)).toContain('cull.trash_missing_pkg');
+    });
+
+    it('falls back to cull.trash_disabled when allowTrash is not passed (fail-closed)', () => {
+      const fixture = buildRendered(false, undefined);
+      expect(paragraphs(fixture)).toContain('cull.trash_disabled');
+    });
+
+    it('shows neither message when trashAvailable is true', () => {
+      const fixture = buildRendered(true, true);
+      expect(paragraphs(fixture).some((p) => p.startsWith('cull.trash_'))).toBe(false);
+    });
   });
 
   it('preview posts dry_run=true and stores the affected list', async () => {

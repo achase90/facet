@@ -61,6 +61,12 @@ interface CullResponse {
         }
       </div>
 
+      @if (!data.trashAvailable) {
+        <p class="text-xs opacity-60 mb-3">
+          {{ (data.allowTrash ? I18N.cull.trash_missing_pkg : I18N.cull.trash_disabled) | translate }}
+        </p>
+      }
+
       @if (needsTarget()) {
         <label for="cullTargetDir" class="block text-xs opacity-60 mb-1">{{ I18N.cull.target_dir | translate }}</label>
         <input id="cullTargetDir" type="text" [value]="targetDir()" (input)="onTargetInput($event)"
@@ -123,7 +129,7 @@ export class CullDialogComponent {
   private readonly snackBar = inject(MatSnackBar);
   private readonly i18n = inject(I18nService);
   private readonly dialogRef = inject(MatDialogRef<CullDialogComponent>);
-  private readonly data = inject<{ paths: string[]; trashAvailable?: boolean }>(MAT_DIALOG_DATA);
+  protected readonly data = inject<{ paths: string[]; trashAvailable?: boolean; allowTrash?: boolean }>(MAT_DIALOG_DATA);
 
   protected readonly actions: CullAction[] = this.data.trashAvailable
     ? ['copy_keeps', 'move_rejects', 'trash_rejects']

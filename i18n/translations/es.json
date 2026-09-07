@@ -2314,6 +2314,8 @@
     "copy_keeps": "Copiar los conservados a una carpeta",
     "move_rejects": "Mover los descartados a una carpeta",
     "trash_rejects": "Enviar descartados a la papelera",
+    "trash_disabled": "La papelera está deshabilitada — un administrador puede habilitarla mediante viewer.cull.allow_trash.",
+    "trash_missing_pkg": "La papelera no está disponible en este servidor — el paquete send2trash no está instalado.",
     "target_dir": "Carpeta de destino",
     "include_companions": "Incluir RAW / XMP asociados",
     "include_sequence_siblings": "Incluir fotogramas asociados (horquillado/panorama)",

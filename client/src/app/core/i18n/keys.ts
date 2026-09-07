@@ -2330,6 +2330,8 @@ export const I18N = {
     copy_keeps: "cull.copy_keeps",
     move_rejects: "cull.move_rejects",
     trash_rejects: "cull.trash_rejects",
+    trash_disabled: "cull.trash_disabled",
+    trash_missing_pkg: "cull.trash_missing_pkg",
     target_dir: "cull.target_dir",
     include_companions: "cull.include_companions",
     include_sequence_siblings: "cull.include_sequence_siblings",

@@ -2314,6 +2314,8 @@
     "copy_keeps": "Copia i mantenuti in una cartella",
     "move_rejects": "Sposta gli scartati in una cartella",
     "trash_rejects": "Cestina gli scartati",
+    "trash_disabled": "Il cestino è disabilitato — un amministratore può abilitarlo tramite viewer.cull.allow_trash.",
+    "trash_missing_pkg": "Il cestino non è disponibile su questo server — il pacchetto send2trash non è installato.",
     "target_dir": "Cartella di destinazione",
     "include_companions": "Includi RAW / XMP associati",
     "include_sequence_siblings": "Includi i fotogrammi associati (bracketing/panorama)",

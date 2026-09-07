@@ -728,6 +728,55 @@ describe('GalleryComponent', () => {
       expect(dialog.open).not.toHaveBeenCalled();
     });
   });
+
+  describe('openCullDialog', () => {
+    function select(paths: string[]) {
+      mockStore.selectedPaths.set(new Set(paths));
+      mockStore.selectionCount.set(paths.length);
+    }
+
+    // The dialog itself is covered by its own spec; this is the wiring — which
+    // capability flags reach it, and that both read fail-closed off the config.
+    it('passes trashAvailable and allowTrash through when both are enabled', async () => {
+      mockStore.config.set({ cull: { allow_trash: true, trash_available: true } });
+      select(['/a.jpg', '/b.jpg']);
+      const dialog = TestBed.inject(MatDialog);
+      (dialog.open as Mock).mockReturnValue({ afterClosed: () => of(null) });
+
+      await component.openCullDialog();
+
+      const data = (dialog.open as Mock).mock.calls[0][1].data;
+      expect(data.trashAvailable).toBe(true);
+      expect(data.allowTrash).toBe(true);
+    });
+
+    it('passes allowTrash true but trashAvailable false when the package is missing', async () => {
+      mockStore.config.set({ cull: { allow_trash: true, trash_available: false } });
+      select(['/a.jpg', '/b.jpg']);
+      const dialog = TestBed.inject(MatDialog);
+      (dialog.open as Mock).mockReturnValue({ afterClosed: () => of(null) });
+
+      await component.openCullDialog();
+
+      const data = (dialog.open as Mock).mock.calls[0][1].data;
+      expect(data.trashAvailable).toBe(false);
+      expect(data.allowTrash).toBe(true);
+    });
+
+    it('fails closed to both false when the config has no cull key at all', async () => {
+      mockStore.config.set({});
+      select(['/a.jpg', '/b.jpg']);
+      const dialog = TestBed.inject(MatDialog);
+      (dialog.open as Mock).mockReturnValue({ afterClosed: () => of(null) });
+
+      await component.openCullDialog();
+
+      const data = (dialog.open as Mock).mock.calls[0][1].data;
+      expect(data.trashAvailable).toBe(false);
+      expect(data.allowTrash).toBe(false);
+    });
+  });
+
   describe('marking a selection as one panorama', () => {
     function select(paths: string[]) {
       mockStore.selectedPaths.set(new Set(paths));
