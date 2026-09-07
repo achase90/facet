@@ -237,6 +237,10 @@ class TestCullApply:
             })
         assert resp.status_code == 400
         assert os.path.isfile(path)
+        # Fix 8: pin the remedy text, not just the status code, so a
+        # regression to a stale or broken message is visible -- export.py's
+        # restart guidance (Fix 9) depends on this substring surviving.
+        assert "pip install send2trash" in resp.json()["detail"]
 
     def test_requires_paths_or_filters(self, client, tmp_path):
         db = _db(tmp_path, [])
@@ -603,13 +607,18 @@ class TestCullCapabilities:
     disabled this" apart from "this environment is missing a package" without
     calling the destructive endpoint just to read its error.
 
-    `gallery.py` memoizes the `send2trash` probe in the module-level
-    `_send2trash_available` (never re-walks `sys.path` after the first call
-    in a process), so `mock.patch.dict("sys.modules", {"send2trash": None})`
-    -- the trick `TestCullApply` uses on the export module -- would be
-    silently inert here once anything in the test process has already primed
-    the memo. These patch `_send2trash_available` itself instead, which is
-    the only thing `_cull_capabilities` actually reads.
+    `gallery.py` reads the package's importability off the module-scope
+    `HAS_SEND2TRASH` constant (set once, at import time, via a plain
+    `try: import send2trash / except ImportError` -- the same idiom
+    `db.connection` uses for `HAS_SQLITE_VEC`), not a per-request probe. A
+    process-wide `mock.patch.dict("sys.modules", {"send2trash": None})`
+    would do nothing to it, since it is read once at import and never
+    consulted again, so these tests patch `HAS_SEND2TRASH` itself instead --
+    the only thing `_cull_capabilities` actually reads for the package half
+    of the answer. `allow_trash` goes through the shared
+    `api.config.cull_allow_trash` helper, which coerces with plain Python
+    truthiness -- see `test_ambiguous_allow_trash_values_never_500_or_disagree`
+    below for the values that made this matter (Fix 2).
     """
 
     def _cull_payload(self, client, allow_trash, package_present):
@@ -619,7 +628,7 @@ class TestCullCapabilities:
         config = {**gallery_module.VIEWER_CONFIG, "cull": {"allow_trash": allow_trash}}
         with (
             mock.patch(f"{_GALLERY_MODULE}.VIEWER_CONFIG", config),
-            mock.patch(f"{_GALLERY_MODULE}._send2trash_available", package_present),
+            mock.patch(f"{_GALLERY_MODULE}.HAS_SEND2TRASH", package_present),
         ):
             resp = client.get("/api/config")
         assert resp.status_code == 200
@@ -651,29 +660,75 @@ class TestCullCapabilities:
         config = {**gallery_module.VIEWER_CONFIG, "cull": None}
         with (
             mock.patch(f"{_GALLERY_MODULE}.VIEWER_CONFIG", config),
-            mock.patch(f"{_GALLERY_MODULE}._send2trash_available", True),
+            mock.patch(f"{_GALLERY_MODULE}.HAS_SEND2TRASH", True),
         ):
             resp = client.get("/api/config")
         assert resp.status_code == 200
         assert resp.json()["cull"] == {"allow_trash": False, "trash_available": False}
 
-    def test_the_real_probe_finds_the_installed_package(self, client):
-        """Every other test in this class patches `_send2trash_available`
-        directly, so none of them ever calls `importlib.util.find_spec` for
-        real -- a misspelled module name (`send_2_trash`, `send2Trash`) or an
-        inverted memo sentinel would still pass all of them, and `/api/config`
-        would report `trash_available: false` on a perfectly good install
-        with nothing red. `send2trash` is a base dependency (`requirements.txt`
-        and both lock files) and is installed in this venv, so resetting the
-        memo to `None` -- its genuine pre-any-request state -- and letting
-        `_cull_capabilities` re-prime it is not environment-fragile: it
-        asserts the packaging fix and the probe together.
+    def test_the_real_probe_finds_the_installed_package(self):
+        """Every other test in this class patches `HAS_SEND2TRASH` directly,
+        so none of them ever exercise the real `import send2trash` that sets
+        it -- a misspelled module name (`send_2_trash`, `send2Trash`) or an
+        inverted `try`/`except` would still pass all of them, and
+        `/api/config` would report `trash_available: false` on a perfectly
+        good install with nothing red.
+
+        `HAS_SEND2TRASH` is set once, at import time, so there is no
+        per-request probe left to re-run -- it replaced the old
+        `_send2trash_available` memo (primed lazily via
+        `importlib.util.find_spec`, benchmarked slower than a plain import
+        with no memo at all) with a plain module-scope constant, the same
+        idiom `db.connection` uses for `HAS_SQLITE_VEC`. What this test can
+        still do is assert the UNPATCHED value directly: a typo'd import
+        name flips it to `False` immediately at import, with no mock
+        involved. `send2trash` is a base dependency (`requirements.txt` and
+        both lock files, and CI installs it in every job that collects this
+        file), not an extra, so asserting it resolves `True` in this venv is
+        not environment-fragile; it is exactly the packaging guarantee that
+        keeps this assertion meaningful.
         """
-        config = {**gallery_module.VIEWER_CONFIG, "cull": {"allow_trash": True}}
+        assert gallery_module.HAS_SEND2TRASH is True
+
+
+class TestCullAllowTrashCoercion:
+    """Fix 2: `cull_allow_trash` (api/config.py) coerces the raw config value
+    with plain Python truthiness before either reader (export.py's guard,
+    gallery.py's `/api/config` report) sees it, so an ambiguous stored value
+    can no longer make `/api/config` 500 (Pydantic strict-bool validation on
+    a non-bool) or report a self-contradictory pair (`trash_available: true`
+    while `allow_trash: false`, the "false" string case: `"false" and True`
+    is `True` in Python, but Pydantic's lax bool parsing coerced the OLD raw
+    `allow_trash` field to `False`).
+
+    Verifies the fix through a real `/api/config` request (not a unit test of
+    the helper in isolation), because the defect was end-to-end: it lived in
+    the response model's field type meeting an uncoerced value on the wire.
+    """
+
+    def _cull_payload(self, client, raw_allow_trash, package_present):
+        config = {**gallery_module.VIEWER_CONFIG, "cull": {"allow_trash": raw_allow_trash}}
         with (
             mock.patch(f"{_GALLERY_MODULE}.VIEWER_CONFIG", config),
-            mock.patch(f"{_GALLERY_MODULE}._send2trash_available", None),
+            mock.patch(f"{_GALLERY_MODULE}.HAS_SEND2TRASH", package_present),
         ):
             resp = client.get("/api/config")
-        assert resp.status_code == 200
-        assert resp.json()["cull"] == {"allow_trash": True, "trash_available": True}
+        return resp
+
+    @pytest.mark.parametrize("raw_allow_trash", [None, "enabled", "false"])
+    def test_ambiguous_allow_trash_values_never_500_or_disagree(self, client, raw_allow_trash):
+        """None (a config with `"cull": {"allow_trash": null}`), a non-boolean
+        string ("enabled"), and the ambiguous quoted-boolean string ("false",
+        which Python truthiness reads as ENABLED, matching export.py's own
+        `and`-based check) must all still return 200 with a payload where
+        `trash_available` is exactly `allow_trash and <package present>` --
+        never a 500, and never a pair where `trash_available` is true while
+        `allow_trash` is false or vice versa.
+        """
+        for package_present in (True, False):
+            resp = self._cull_payload(client, raw_allow_trash, package_present)
+            assert resp.status_code == 200
+            cull = resp.json()["cull"]
+            expected_allow_trash = bool(raw_allow_trash)
+            assert cull["allow_trash"] == expected_allow_trash
+            assert cull["trash_available"] == (expected_allow_trash and package_present)

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from api.auth import CurrentUser, get_optional_user
-from api.config import VIEWER_CONFIG, _FULL_CONFIG
+from api.config import VIEWER_CONFIG, _FULL_CONFIG, cull_allow_trash
 from api.database import get_async_db, get_db
 from api.models.gallery import GalleryParams, Photo, PhotosResponse
 from api.models.discovery import PhotoSetResponse, PhotoTypeCountsResponse, ViewerConfigResponse
@@ -34,6 +34,12 @@ from api.types import (
 )
 from utils.histogram import unpack_histogram
 from utils.sequence import BRACKET as BRACKET_KIND
+
+try:
+    import send2trash  # noqa: F401
+    HAS_SEND2TRASH = True
+except ImportError:
+    HAS_SEND2TRASH = False
 
 router = APIRouter(tags=["gallery"])
 logger = logging.getLogger(__name__)
@@ -1424,34 +1430,28 @@ def _social_export_presets() -> dict:
     return {'presets': presets}
 
 
-_send2trash_available = None
-
-
 def _cull_capabilities() -> dict:
     """Whether the ``trash_rejects`` action on ``/api/cull/apply`` can succeed.
 
     Mirrors that endpoint's own two-part refusal (``export.py``): a 403 when
     ``viewer.cull.allow_trash`` is off, a 400 when the ``send2trash`` package
-    is missing. Read ``allow_trash`` exactly the way that endpoint does --
-    ``(VIEWER_CONFIG.get('cull', {}) or {}).get('allow_trash', False)`` --
-    the ``or {}`` matters because a config can hold ``"cull": null`` rather
-    than omitting the key.
+    is missing. ``allow_trash`` goes through the shared
+    ``api.config.cull_allow_trash`` helper -- the same one ``export.py``
+    calls before it acts -- so both readers coerce the raw config value with
+    the same Python-truthiness rule and can never disagree about whether
+    trashing is enabled, however the operator wrote the value.
 
-    The package probe uses ``importlib.util.find_spec`` rather than a real
-    ``import``: this function runs on ``/api/config``, which is on the SPA's
-    startup path, and a real import would pay ``send2trash``'s module init
-    cost on every page load just to answer a yes/no question. The probe's
-    answer is memoized at module scope -- whether the package is importable
-    cannot change without a process restart (the venv is fixed for the
-    process's lifetime), while ``find_spec`` itself walks ``sys.path`` on
-    every call, so caching turns a per-request filesystem scan into one.
+    ``send2trash``'s importability is read from the module-scope
+    ``HAS_SEND2TRASH`` constant (set once, at import time, the same idiom
+    ``db.connection`` uses for ``HAS_SQLITE_VEC``) rather than probed here.
+    That constant is fixed for the life of the process: a ``pip install
+    send2trash`` into a running venv is not reflected until the server
+    restarts, so ``trash_available`` can keep reporting ``false`` right
+    after an operator installs the package -- see the restart guidance on
+    ``export.py``'s matching 400 detail.
     """
-    global _send2trash_available
-    if _send2trash_available is None:
-        import importlib.util
-        _send2trash_available = importlib.util.find_spec("send2trash") is not None
-    allow_trash = (VIEWER_CONFIG.get('cull', {}) or {}).get('allow_trash', False)
-    return {'allow_trash': allow_trash, 'trash_available': allow_trash and _send2trash_available}
+    allow_trash = cull_allow_trash(VIEWER_CONFIG)
+    return {'allow_trash': allow_trash, 'trash_available': allow_trash and HAS_SEND2TRASH}
 
 
 def _render_migration_status():
