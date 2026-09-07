@@ -190,6 +190,44 @@ jobs:
             fail=1
           fi
 
+          # The only check here that exercises the root branch's chown decision:
+          # a pre-existing, world-readable /config/scoring_config.json must
+          # survive a container start byte-for-byte. This is the regression
+          # test for issue #127 — under rootless Podman the entrypoint's old
+          # unconditional chown/chmod reassigned an operator's own config to
+          # the container's subuid ON THE HOST on every single restart,
+          # locking them out of editing it again without sudo. The other
+          # branch (a config the runtime user genuinely cannot read) needs a
+          # file the "facet" uid cannot read even via its world bits, which a
+          # host-side bind mount can't easily stage from this workflow — that
+          # path is exercised by tests/test_docker_entrypoint.py instead.
+          cfg_dir=$(mktemp -d)
+          # 0755, not mktemp's 0700: the entrypoint chowns /config itself to
+          # the container's "facet" uid, and this directory IS that mount. At
+          # 0700 the runner would lose search permission on its own temp
+          # directory the moment the container exited, and every line below --
+          # the stat, the cat, the cleanup -- would die on EACCES under the
+          # `set -e` at the top of this script, failing the publish over a
+          # check that had actually passed.
+          chmod 755 "$cfg_dir"
+          printf '{"viewer": {"password": "not-a-real-secret"}}\n' > "$cfg_dir/scoring_config.json"
+          chmod 644 "$cfg_dir/scoring_config.json"
+          before=$(stat -c '%a %u %i' "$cfg_dir/scoring_config.json")
+          before_content=$(cat "$cfg_dir/scoring_config.json")
+          docker run --rm -v "$cfg_dir":/config "$image" true
+          after=$(stat -c '%a %u %i' "$cfg_dir/scoring_config.json")
+          after_content=$(cat "$cfg_dir/scoring_config.json")
+          echo "pre-existing config mode/owner/inode: '$before' -> '$after'"
+          if [ "$before" != "$after" ] || [ "$before_content" != "$after_content" ]; then
+            echo "::error::issue #127 regression: a pre-existing /config/scoring_config.json changed (mode/owner/inode '$before' -> '$after') across a container start with no other change to it. The entrypoint must leave an existing, readable config's mode, ownership and content alone."
+            fail=1
+          fi
+          # Best-effort: the directory now belongs to the container's uid, so
+          # only its contents are still the runner's to remove. The runner is
+          # ephemeral and the leftover is a temp directory either way -- this
+          # must never be the thing that fails a publish.
+          rm -rf "$cfg_dir" 2>/dev/null || true
+
           exit $fail
 
       - name: Push
