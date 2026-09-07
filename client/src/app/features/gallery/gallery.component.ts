@@ -297,13 +297,15 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [mosaicMode]="effectiveGalleryMode() === 'mosaic'"
                       [config]="store.config()"
                       [isSelected]="selectedPaths().has(photo.path)"
+                      [isActive]="row.startIndex + i === activeIndex()"
+                      [gridHasActiveCard]="hasActivePhoto()"
                       [currentSort]="store.filters().sort"
                       [thumbSize]="thumbSize()"
                       [isEditionMode]="auth.isEdition()"
                       [personFilterId]="store.filters().person_id"
                       [tooltipMode]="tooltipMode()"
                       [panelActivation]="panelActivation()"
-                      (selectionChange)="toggleSelection($event.photo, $event.event)"
+                      (selectionChange)="toggleSelection($event.photo, $event.event, row.startIndex + i)"
                       (tooltipShow)="showTooltip($event.event, $event.photo)"
                       (tooltipHide)="hideTooltip()"
                       (tagClicked)="store.updateFilter('tag', $event)"
@@ -340,6 +342,8 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                   [attr.data-pidx]="i"
                   [config]="store.config()"
                   [isSelected]="selectedPaths().has(photo.path)"
+                  [isActive]="i === activeIndex()"
+                  [gridHasActiveCard]="hasActivePhoto()"
                   [hideDetails]="effectiveHideDetails()"
                   [currentSort]="store.filters().sort"
                   [thumbSize]="thumbSize()"
@@ -349,7 +353,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [panelActivation]="panelActivation()"
                   [style.content-visibility]="'auto'"
                   [style.contain-intrinsic-size]="'auto ' + (cardWidth() + 80) + 'px'"
-                  (selectionChange)="toggleSelection($event.photo, $event.event)"
+                  (selectionChange)="toggleSelection($event.photo, $event.event, i)"
                   (tooltipShow)="showTooltip($event.event, $event.photo)"
                   (tooltipHide)="hideTooltip()"
                   (tagClicked)="store.updateFilter('tag', $event)"
@@ -375,7 +379,12 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
               (keydown)="onGridKeydown($event)"
             >
               @for (row of mosaicRows(); track row.photos[0]?.path ?? $index) {
-                <div class="flex gap-2" style="content-visibility: auto; contain-intrinsic-size: auto 300px">
+                <!-- No content-visibility here: every app-photo-card host below
+                     already declares exactly the same pair, so the rows were
+                     repeating their children's own rendering hint, and paint
+                     containment came with it -- which clipped the current
+                     photo's frame off at the row's top and bottom edges. -->
+                <div class="flex gap-2">
                   @for (photo of row.photos; track photo.path; let i = $index) {
                     <app-photo-card
                   [collapsedSequenceKinds]="collapsedSequenceKinds()"
@@ -388,13 +397,15 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [mosaicMode]="true"
                       [config]="store.config()"
                       [isSelected]="selectedPaths().has(photo.path)"
+                      [isActive]="row.startIndex + i === activeIndex()"
+                      [gridHasActiveCard]="hasActivePhoto()"
                       [currentSort]="store.filters().sort"
                       [thumbSize]="thumbSize()"
                       [isEditionMode]="auth.isEdition()"
                       [personFilterId]="store.filters().person_id"
                       [tooltipMode]="tooltipMode()"
                       [panelActivation]="panelActivation()"
-                      (selectionChange)="toggleSelection($event.photo, $event.event)"
+                      (selectionChange)="toggleSelection($event.photo, $event.event, row.startIndex + i)"
                       (tooltipShow)="showTooltip($event.event, $event.photo)"
                       (tooltipHide)="hideTooltip()"
                       (tagClicked)="store.updateFilter('tag', $event)"
@@ -1099,8 +1110,17 @@ export class GalleryComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected toggleSelection(photo: Photo, event?: MouseEvent): void {
+  /** Selecting a photo with the pointer also moves the grid's cursor onto it,
+   *  so the next rating keystroke lands on the photo the user just clicked
+   *  rather than on wherever the arrow keys were left. The index comes from the
+   *  template because that is where it is already known -- it is the same
+   *  expression each call site feeds `data-pidx`, which is what `focusCard`
+   *  looks a card up by, so the cursor, the marker and the focus target cannot
+   *  drift apart. Deriving it here from the path would be a second answer to a
+   *  question the caller has already answered. */
+  protected toggleSelection(photo: Photo, event: MouseEvent | undefined, index: number): void {
     this.store.toggleSelection(photo, event);
+    this.activeIndex.set(index);
   }
 
   protected clearSelection(): void {
@@ -1519,6 +1539,16 @@ export class GalleryComponent implements OnInit, OnDestroy {
 
   /** Index of the keyboard-focused photo; -1 when keyboard nav is inactive. */
   protected readonly activeIndex = signal(-1);
+
+  /** Whether the cursor is actually standing on a photo that is on screen.
+   *
+   *  The cards fade everything that is not the current photo, so this has to be
+   *  false in both of the cases where there is nothing to leave at full
+   *  strength: before the cursor has ever moved (-1), and after a filter change
+   *  has left it pointing past the end of a shorter result set. Either one
+   *  would otherwise render the whole grid dimmed with nothing marked. */
+  protected readonly hasActivePhoto = computed(() =>
+    this.activeIndex() >= 0 && this.activeIndex() < this.store.photos().length);
 
   /** Columns per row in grid mode (mirrors the CSS auto-fill column math). */
   private gridColumns(): number {

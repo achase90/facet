@@ -57,7 +57,30 @@ const DEFAULT_CLIPPING_BADGE_PERCENT = 5;
 @Component({
   selector: 'app-photo-card',
   standalone: true,
-  host: { role: 'gridcell', style: 'content-visibility: auto; contain-intrinsic-size: auto 300px' },
+  host: {
+    role: 'gridcell',
+    style: 'content-visibility: auto; contain-intrinsic-size: auto 300px',
+    // The current-photo marker, and the dimming of every card that is not it.
+    // Both sit on the host rather than on the tile below, because the host's
+    // own `content-visibility: auto` brings paint containment with it, and that
+    // clips whatever a descendant draws outside the card's box -- the tile's
+    // focus-visible outline included. The host's own outline is the one that
+    // still reaches the 8px gutter, and the gutter is the only place a frame is
+    // not competing with the photograph for contrast: a line on the tile's edge
+    // loses to skin tones and blurred background, which is what the 2px
+    // selection ring already demonstrates. offset-2 plus 4px lands it entirely
+    // on the page background, 2px clear of the next card.
+    '[class.outline-4]': 'isActive()',
+    '[class.outline-[var(--mat-sys-tertiary)]]': 'isActive()',
+    '[class.outline-offset-2]': 'isActive()',
+    // Matches the tile's own rounding so the offset outline is concentric with
+    // it rather than cutting square corners past it.
+    '[class.rounded-lg]': 'isActive()',
+    // The hosts are flex/grid items, so this applies without positioning them.
+    // Well under the action bar (z-50) and the scroll-to-top button (z-40).
+    '[class.z-10]': 'isActive()',
+    '[class.opacity-50]': 'isDimmed()',
+  },
   imports: [
     MatIconModule,
     MatButtonModule,
@@ -86,6 +109,7 @@ const DEFAULT_CLIPPING_BADGE_PERCENT = 5;
       [class.md:hover:ring-[var(--mat-sys-outline-variant)]]="!isSelected()"
       [attr.aria-label]="photo().keeper_hint?.has_better ? photo().filename + ', ' + ('culling.reason.better_shot' | translate) : photo().filename"
       [attr.aria-pressed]="isSelected()"
+      [attr.aria-current]="isActive() ? 'true' : null"
       (click)="onSelect($event)"
       (keydown.enter)="onKeyOpen($event)"
       (keydown.space)="onKeySelect($event)"
@@ -462,10 +486,31 @@ export class PhotoCardComponent {
 
   // Display state
   readonly isSelected = input(false);
+  /** Whether this card is the one the grid's keyboard cursor is standing on.
+   *
+   *  Independent of `isSelected`: a card can be both, and the two say different
+   *  things -- selection is a set the batch actions operate on, current is the
+   *  single photo the next rating keystroke lands on. */
+  readonly isActive = input(false);
+  /** Whether the grid this card sits in has a current photo at all.
+   *
+   *  Stated as a fact about the grid rather than passed as "dim yourself": a
+   *  card cannot see whether some *other* card is the current one. It stays
+   *  false until the grid's cursor first lands somewhere, which is what keeps
+   *  a gallery nobody has navigated yet from rendering every tile faded. */
+  readonly gridHasActiveCard = input(false);
   readonly hideDetails = input(false);
   readonly mosaicMode = input(false);
   readonly currentSort = input('aggregate');
   readonly thumbSize = input(240);
+
+  /** Every card except the current one, and only once there is a current one.
+   *
+   *  Fading the rest is the half of the marker that a photograph cannot defeat:
+   *  a line drawn at the tile's own edge competes with whatever the photo puts
+   *  there, whereas a grid where one tile alone is at full strength reads from
+   *  across the room. */
+  protected readonly isDimmed = computed(() => this.gridHasActiveCard() && !this.isActive());
 
   // Edition mode
   readonly isEditionMode = input(false);

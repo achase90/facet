@@ -215,6 +215,78 @@ describe('GalleryComponent', () => {
     });
   });
 
+  describe('the current photo', () => {
+    beforeEach(() => {
+      mockStore.photos.set([{ path: '/a.jpg' }, { path: '/b.jpg' }, { path: '/c.jpg' }]);
+      mockStore.config.set({ features: { show_rating_controls: true } });
+      (mockAuth as { isEdition: unknown }).isEdition = vi.fn(() => true);
+    });
+
+    function activeIndex(): number {
+      return (component as unknown as { activeIndex(): number }).activeIndex();
+    }
+
+    function hasActivePhoto(): boolean {
+      return (component as unknown as { hasActivePhoto(): boolean }).hasActivePhoto();
+    }
+
+    function click(photo: { path: string }, index: number): void {
+      (component as unknown as {
+        toggleSelection(p: unknown, e: MouseEvent | undefined, i: number): void;
+      }).toggleSelection(photo, undefined, index);
+    }
+
+    function press(key: string): void {
+      const ev = new KeyboardEvent('keydown', { key });
+      Object.defineProperty(ev, 'target', { value: null, configurable: true });
+      (component as unknown as { onGridKeydown(e: KeyboardEvent): void }).onGridKeydown(ev);
+    }
+
+    it('marks nothing before the cursor has ever moved, so nothing is dimmed at rest', () => {
+      expect(activeIndex()).toBe(-1);
+      expect(hasActivePhoto()).toBe(false);
+    });
+
+    it('moves onto the photo the pointer just clicked', () => {
+      click({ path: '/c.jpg' }, 2);
+      expect(activeIndex()).toBe(2);
+      expect(hasActivePhoto()).toBe(true);
+    });
+
+    it('still hands the click to the store', () => {
+      const photo = { path: '/b.jpg' };
+      click(photo, 1);
+      expect(mockStore.toggleSelection).toHaveBeenCalledWith(photo, undefined);
+    });
+
+    it('rates the photo that was clicked, not the one the arrow keys were left on', () => {
+      // The defect: the pointer never moved the cursor, so a rating typed after
+      // a click landed on whatever the keyboard had been on. Silently.
+      press('ArrowRight');
+      expect(activeIndex()).toBe(1);
+      click({ path: '/c.jpg' }, 2);
+      press('3');
+      expect(mockStore.setRating).toHaveBeenCalledWith('/c.jpg', 3);
+    });
+
+    it('still moves with the arrow keys once a click has placed it', () => {
+      click({ path: '/a.jpg' }, 0);
+      press('ArrowRight');
+      expect(activeIndex()).toBe(1);
+      press('ArrowLeft');
+      expect(activeIndex()).toBe(0);
+      press('End');
+      expect(activeIndex()).toBe(2);
+    });
+
+    it('reports no current photo when a shorter result set leaves the cursor past the end', () => {
+      // Otherwise the grid would render every card dimmed with none marked.
+      click({ path: '/c.jpg' }, 2);
+      mockStore.photos.set([{ path: '/a.jpg' }]);
+      expect(hasActivePhoto()).toBe(false);
+    });
+  });
+
   describe('ngOnInit()', () => {
     it('should call store.loadConfig, loadFilterOptions, loadTypeCounts, and loadPhotos', async () => {
       await component.ngOnInit();
