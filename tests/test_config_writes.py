@@ -1,5 +1,6 @@
 """Tests for api/config_writes.py — the locked category priority writer."""
 
+import errno
 import json
 import os
 import shutil
@@ -574,6 +575,301 @@ class TestAtomicConfigWrite:
         assert first_backup != second_backup
         assert Path(first_backup).read_text() == first_contents
         assert Path(second_backup).read_text() == second_contents
+
+
+class _ForeignOwner:
+    """The destination's real ``lstat``, wearing a uid and gid that are not ours.
+
+    The ownership route only engages when the staged copy and the destination
+    differ in ``(st_uid, st_gid)``, and an unprivileged test cannot create a file
+    owned by anybody else. Faking the ANSWER rather than the file keeps every
+    other field real — ``st_ino`` and ``st_dev`` above all, which the in-place
+    route re-checks the opened descriptor against and would otherwise refuse.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self.st_uid = real.st_uid + 1
+        self.st_gid = real.st_gid + 1
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.fixture
+def foreign_destination(monkeypatch):
+    """Report the config as belonging to another account, identity untouched."""
+    real_identity = config_resolve._destination_identity
+
+    def _foreign(path):
+        info = real_identity(path)
+        return info if info is None else _ForeignOwner(info)
+
+    monkeypatch.setattr(config_resolve, "_destination_identity", _foreign)
+
+
+@pytest.fixture
+def denied_chown(monkeypatch):
+    """Refuse every chown the way a rootless container's kernel does."""
+    def _refuse(*args, **kwargs):
+        # Constructed with TWO arguments so that ``errno`` is EPERM rather than
+        # None. A bare PermissionError("nope") carries errno None, which the
+        # writer re-raises instead of downgrading — the test would still pass,
+        # but through the "this is a bug, not a denial" branch, proving nothing.
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "chown", _refuse)
+
+
+# os.geteuid does not exist on Windows and skipif decorators evaluate at import
+# time, so it is read the same guarded way tests/test_api_config.py reads it.
+_IS_ROOT = os.geteuid() == 0 if hasattr(os, "geteuid") else False
+_NOBODY = 65534
+
+
+@pytest.mark.skipif(sys.platform == 'win32',
+                    reason="POSIX ownership, O_NOFOLLOW and inode identity have no Windows analogue")
+class TestOwnershipPreservingCommit:
+    """``os.replace`` commits into a NEW inode, owned by whoever ran the writer.
+
+    Under a rootless container that re-owns the operator's config to a subuid on
+    every single save, and a non-root process cannot chown it back — the file
+    becomes uneditable from the host that owns it. So the writer adopts the
+    destination's owner onto its staging copy where it can, and rewrites the file
+    through its own descriptor where it cannot.
+
+    What none of that may do is turn a refusal into a failed write: every one of
+    these writes succeeds today, so the last test here is the one that keeps the
+    change from being a regression.
+    """
+
+    PAYLOAD = {"viewer": {"password": "plaintext-secret"},
+               "performance": {"mmap_size_mb": 99}}
+    SEED = {"performance": {"mmap_size_mb": 1}}
+
+    @staticmethod
+    def _seed(tmp_path, mode=None, data=None):
+        """A config that already exists, so there is an owner to preserve."""
+        cfg = tmp_path / "scoring_config.json"
+        cfg.write_text(json.dumps(data if data is not None else TestOwnershipPreservingCommit.SEED))
+        if mode is not None:
+            os.chmod(cfg, mode)
+        return cfg
+
+    @staticmethod
+    def _write(cfg, data, **kwargs):
+        config_resolve.atomic_write_json(str(cfg), data, **kwargs)
+
+    def test_the_inode_survives_when_the_owner_cannot_be_adopted(
+            self, tmp_path, foreign_destination, denied_chown):
+        """The whole point: no rename, so nothing re-owns the operator's file."""
+        cfg = self._seed(tmp_path)
+        before = os.stat(cfg)
+
+        self._write(cfg, self.PAYLOAD)
+
+        after = os.stat(cfg)
+        assert after.st_ino == before.st_ino, "the config was renamed over, so it changed owner"
+        assert json.loads(cfg.read_text()) == self.PAYLOAD
+        assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+        assert not list(tmp_path.glob(".scoring_config.tmp*"))
+
+    def test_an_adoptable_owner_still_commits_by_rename(self, tmp_path, foreign_destination,
+                                                        monkeypatch):
+        """Preserving the owner must not cost the atomicity of the rename.
+
+        Where the chown is permitted the staged copy already belongs to the right
+        account, so the route with every property this module wants — no torn
+        window, no partial write — is the one that runs.
+        """
+        cfg = self._seed(tmp_path)
+        before = os.stat(cfg)
+        chowned, replaced = [], []
+        real_replace = os.replace
+
+        monkeypatch.setattr(os, "chown", lambda path, uid, gid: chowned.append((uid, gid)))
+        monkeypatch.setattr(os, "replace", lambda src, dst: (replaced.append(dst),
+                                                             real_replace(src, dst))[1])
+
+        self._write(cfg, self.PAYLOAD)
+
+        assert chowned == [(before.st_uid + 1, before.st_gid + 1)]
+        assert replaced == [str(cfg)]
+        assert os.stat(cfg).st_ino != before.st_ino
+        assert json.loads(cfg.read_text()) == self.PAYLOAD
+
+    @pytest.mark.parametrize("mode", [0o600, 0o640])
+    def test_the_mode_survives_an_in_place_commit(self, tmp_path, foreign_destination,
+                                                  denied_chown, mode):
+        """The rename route copies the mode across; this route never gives it up.
+
+        Same guarantee as ``TestAtomicConfigWrite`` asserts of the rename — a
+        co-deployed CLI reading the config through its group must not lose access
+        because the writer took the other route.
+        """
+        cfg = self._seed(tmp_path, mode=mode)
+        before = os.stat(cfg)
+
+        self._write(cfg, self.PAYLOAD)
+
+        assert os.stat(cfg).st_ino == before.st_ino
+        assert stat.S_IMODE(os.stat(cfg).st_mode) == mode
+
+    def test_a_shorter_config_truncates_its_tail(self, tmp_path, foreign_destination,
+                                                 denied_chown):
+        """Without the ftruncate the old config's tail survives past the new one,
+        and the result is not a config at all — it is a parse error, which arms
+        ``config_load_failed()`` and locks every edition route."""
+        cfg = self._seed(tmp_path, data={"viewer": {"password": "x" * 400}})
+        before = os.stat(cfg)
+
+        self._write(cfg, self.SEED)
+
+        payload = json.dumps(self.SEED, indent=2)
+        assert os.stat(cfg).st_ino == before.st_ino, "this must be the in-place route to mean anything"
+        assert os.stat(cfg).st_size == len(payload)
+        assert json.loads(cfg.read_text()) == self.SEED
+
+    def test_the_staged_copy_is_fsynced_before_the_destination_is_opened(
+            self, tmp_path, foreign_destination, denied_chown, monkeypatch):
+        """The staging copy is the only thing that can restore a torn config, so
+        it has to be on the disk before anything is allowed to tear it."""
+        cfg = self._seed(tmp_path)
+        events = []
+        real_open, real_fsync, real_write = os.open, os.fsync, os.write
+
+        def _open(path, *args, **kwargs):
+            events.append(("open", str(path)))
+            return real_open(path, *args, **kwargs)
+
+        def _fsync(fd):
+            events.append(("fsync", None))
+            return real_fsync(fd)
+
+        def _write(fd, data):
+            events.append(("write", None))
+            return real_write(fd, data)
+
+        monkeypatch.setattr(os, "open", _open)
+        monkeypatch.setattr(os, "fsync", _fsync)
+        monkeypatch.setattr(os, "write", _write)
+
+        self._write(cfg, self.PAYLOAD)
+
+        opened = events.index(("open", str(cfg)))
+        assert ("fsync", None) in events[:opened], "the destination was opened before any fsync"
+        assert events.index(("write", None)) > opened
+
+    def test_a_symlinked_destination_is_replaced_rather_than_followed(
+            self, tmp_path, foreign_destination, denied_chown):
+        """A link must be SUBSTITUTED, never written through — that is what
+        docker-entrypoint.sh and the backup writer both promise about this
+        function, and a denied chown must not talk it into the other route."""
+        victim = tmp_path / "victim.txt"
+        victim.write_text("not the config")
+        cfg = tmp_path / "scoring_config.json"
+        cfg.symlink_to(victim)
+
+        self._write(cfg, self.PAYLOAD)
+
+        assert victim.read_text() == "not the config"
+        assert not cfg.is_symlink()
+        assert json.loads(cfg.read_text()) == self.PAYLOAD
+
+    def test_a_failed_in_place_write_keeps_the_staged_copy(
+            self, tmp_path, foreign_destination, denied_chown, monkeypatch):
+        """This route can tear the config, which the rename never could. When it
+        does, the staging copy is the only whole config left on the disk and must
+        survive — ``api.config`` points the operator at it by name."""
+        cfg = self._seed(tmp_path)
+        before, old_text = os.stat(cfg), cfg.read_text()
+
+        def _no_space(fd, data):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        # Surgical: the staging write goes through os.fdopen().write(), which is
+        # the C io layer and never calls os.write, so this only reaches the
+        # in-place loop.
+        monkeypatch.setattr(os, "write", _no_space)
+
+        with pytest.raises(OSError) as caught:
+            self._write(cfg, self.PAYLOAD)
+        assert caught.value.errno == errno.ENOSPC
+
+        staged = list(tmp_path.glob(".scoring_config.tmp*.json"))
+        assert len(staged) == 1, "the only intact copy of the new config was deleted"
+        assert json.loads(staged[0].read_text()) == self.PAYLOAD
+        assert os.stat(cfg).st_ino == before.st_ino
+        assert cfg.read_text() == old_text
+
+    def test_a_destination_that_cannot_be_renamed_is_rewritten_in_place(
+            self, tmp_path, monkeypatch):
+        """A single-file Docker bind mount answers EBUSY to the rename while the
+        file itself is perfectly writable. api/config.py used to tell operators
+        that case was unfixable."""
+        cfg = self._seed(tmp_path)
+        before = os.stat(cfg)
+
+        def _busy(src, dst):
+            raise OSError(errno.EBUSY, "Device or resource busy")
+
+        monkeypatch.setattr(os, "replace", _busy)
+
+        self._write(cfg, self.PAYLOAD)
+
+        assert os.stat(cfg).st_ino == before.st_ino
+        assert json.loads(cfg.read_text()) == self.PAYLOAD
+        assert not list(tmp_path.glob(".scoring_config.tmp*"))
+
+    def test_the_write_still_lands_when_neither_route_can_preserve_the_owner(
+            self, tmp_path, foreign_destination, denied_chown, monkeypatch, caplog):
+        """Preserving ownership is best-effort. A config write that succeeds
+        today must not start failing because the file changed hands — so the
+        rename runs anyway, and the operator is told what it cost."""
+        cfg = self._seed(tmp_path)
+        before = os.stat(cfg)
+        real_open = os.open
+
+        def _refuse_the_config(path, *args, **kwargs):
+            if str(path) == str(cfg):
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", _refuse_the_config)
+
+        with caplog.at_level(logging.WARNING, logger="facet.config_resolve"):
+            self._write(cfg, self.PAYLOAD)
+
+        assert json.loads(cfg.read_text()) == self.PAYLOAD
+        assert os.stat(cfg).st_ino != before.st_ino, "the rename must still be the fallback"
+        assert "Could not preserve the ownership" in caplog.text
+        assert str(before.st_uid + 1) in caplog.text
+        assert "--userns=keep-id" in caplog.text
+
+    @pytest.mark.parametrize("mode", [0o600, 0o640])
+    def test_an_absent_destination_is_created_at_the_named_mode(self, tmp_path, mode):
+        """There is no owner and no mode to preserve, so nothing about the route
+        selection may disturb the create path every native install now takes."""
+        cfg = tmp_path / "scoring_config.json"
+
+        self._write(cfg, self.PAYLOAD, new_file_mode=mode)
+
+        assert stat.S_IMODE(os.stat(cfg).st_mode) == mode
+        assert json.loads(cfg.read_text()) == self.PAYLOAD
+
+    @pytest.mark.skipif(not _IS_ROOT, reason="only root may chown a file to another account")
+    def test_root_adopts_the_real_owner_and_still_renames(self, tmp_path):
+        """The chown-SUCCEEDS branch, which is unreachable unprivileged: every
+        other test here can only fake the destination's owner."""
+        cfg = self._seed(tmp_path)
+        os.chown(cfg, _NOBODY, _NOBODY)
+        before = os.stat(cfg)
+
+        self._write(cfg, self.PAYLOAD)
+
+        after = os.stat(cfg)
+        assert (after.st_uid, after.st_gid) == (_NOBODY, _NOBODY)
+        assert after.st_ino != before.st_ino, "an adoptable owner must still commit by rename"
 
 
 class TestConfigWriteLock:

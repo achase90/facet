@@ -85,7 +85,12 @@ def write_owner_only_backup(source_path, backup_path):
     server down would hand a denial of service to whoever planted the link,
     while the write it guards is still safe: the config writers go through
     ``atomic_write_json``, which replaces the link itself instead of following
-    it.
+    it. That guarantee survived the addition of a second commit route there and
+    is enforced on both — the route selector reads the destination with
+    ``os.lstat`` and sends a symlink straight to ``os.replace``, and the
+    in-place route opens with the same ``O_NOFOLLOW`` this backup writer uses,
+    so a link raced in after that lstat fails the open rather than being written
+    through.
     """
     if not os.path.exists(source_path):
         return None

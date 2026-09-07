@@ -8,6 +8,7 @@ rather than on the ones documented as shipped. Resolving one file over the
 other removes the whole class: there is nothing left to keep in step.
 """
 
+import errno
 import json
 import os
 import stat
@@ -17,10 +18,11 @@ from pathlib import Path
 
 import pytest
 
+import config_resolve
 from config import ScoringConfig
 from config_resolve import (
     deep_merge, default_config_path, defaults_path, delta_for_write, load_defaults,
-    load_resolved, path_is_named, subtract_defaults,
+    load_resolved, path_is_named, staged_config_copies, subtract_defaults,
 )
 
 
@@ -387,3 +389,109 @@ class TestCompactConfig:
         backups = list(tmp_path.glob("scoring_config.json.backup.*"))
         assert len(backups) == 1
         assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+
+
+class TestStagedConfigCopies:
+    """A config write that had to rewrite the file IN PLACE — to keep the owner
+    an ``os.replace`` would have changed — can be interrupted partway, leaving a
+    torn config plus the one complete copy it was about to become.
+
+    ``api.config`` names that copy to the operator when the config fails to
+    parse. Finding it is all this does: nothing restores it, because the
+    directory is writable by the account the server runs as and the suffix is
+    verified against nothing.
+    """
+
+    @staticmethod
+    def _stage(directory, name, mtime):
+        staged = directory / name
+        staged.write_text("{}")
+        os.utime(staged, (mtime, mtime))
+        return staged
+
+    def test_a_clean_directory_has_none(self, tmp_path):
+        (tmp_path / "scoring_config.json").write_text("{}")
+        assert staged_config_copies(str(tmp_path / "scoring_config.json")) == []
+
+    def test_they_come_back_newest_first(self, tmp_path):
+        """The newest is the one the interrupted write staged; anything older is
+        an earlier crash, and offering that first would restore the wrong config.
+        """
+        older = self._stage(tmp_path, ".scoring_config.tmpaaa.json", 1_000_000)
+        newer = self._stage(tmp_path, ".scoring_config.tmpbbb.json", 2_000_000)
+
+        assert staged_config_copies(str(tmp_path / "scoring_config.json")) == [
+            str(newer), str(older)]
+
+    def test_the_config_and_its_backups_are_not_staging_copies(self, tmp_path):
+        config_path = tmp_path / "scoring_config.json"
+        config_path.write_text("{}")
+        (tmp_path / "scoring_config.json.backup").write_text("{}")
+        (tmp_path / "scoring_config.json.backup.20260101_000000").write_text("{}")
+        staged = self._stage(tmp_path, ".scoring_config.tmpccc.json", 1_000_000)
+
+        assert staged_config_copies(str(config_path)) == [str(staged)]
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason="POSIX directory permissions")
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                        reason="root reads a directory whatever its mode says")
+    def test_an_unreadable_directory_yields_nothing(self, tmp_path):
+        """This is a diagnostic on an already-failing path: it must not raise a
+        second error on top of the one the operator is being told about."""
+        closed = tmp_path / "closed"
+        closed.mkdir()
+        os.chmod(closed, 0o000)
+        try:
+            assert staged_config_copies(str(closed / "scoring_config.json")) == []
+        finally:
+            os.chmod(closed, 0o700)
+
+
+class TestInPlaceCommitStillWritesTheDelta:
+    """The route the writer takes must not change WHAT it writes.
+
+    ``write_user_config`` persists the override, not the resolved config, and the
+    in-place route is reached through exactly the same function — so a config
+    whose owner could not be adopted must still end up holding three keys rather
+    than the 3700-line resolved tree.
+    """
+
+    def test_a_denied_chown_still_persists_only_the_override(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "scoring_config.json"
+        config_path.write_text("{}")
+        before = os.stat(config_path).st_ino
+
+        real_identity = config_resolve._destination_identity
+
+        class _ForeignOwner:
+            """The real lstat with somebody else's uid — an unprivileged test
+            cannot create a file it does not own, so the ANSWER is faked and
+            every identity field left real."""
+
+            def __init__(self, real):
+                self._real = real
+                self.st_uid = real.st_uid + 1
+                self.st_gid = real.st_gid + 1
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        def _foreign(path):
+            info = real_identity(path)
+            return info if info is None else _ForeignOwner(info)
+
+        def _refuse(*args, **kwargs):
+            # Two-arg: a bare PermissionError carries errno None, which the
+            # writer re-raises rather than downgrading to the in-place route.
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+
+        monkeypatch.setattr(config_resolve, "_destination_identity", _foreign)
+        monkeypatch.setattr(os, "chown", _refuse)
+
+        resolved = load_resolved(str(config_path), named=True)
+        resolved["performance"]["mmap_size_mb"] = 4096
+        config_resolve.write_user_config(str(config_path), resolved)
+
+        assert os.stat(config_path).st_ino == before, "the file was renamed over, not rewritten"
+        assert json.loads(config_path.read_text()) == {"performance": {"mmap_size_mb": 4096}}
+        assert load_resolved(str(config_path), named=True)["performance"]["mmap_size_mb"] == 4096

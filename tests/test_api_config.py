@@ -4,6 +4,7 @@ match in ``map_disk_path`` (A5#2) and the server-secret store, resolved by
 (A6#9, F1).
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ from unittest import mock
 import pytest
 
 import api.config as api_config
+import config_resolve
 from api.config import load_viewer_config, map_disk_path
 
 _MOD = "api.config"
@@ -846,6 +848,86 @@ class TestLegacySecretMigration:
         surviving = json.loads(isolated_config.read_text())
         assert surviving == {k: v for k, v in payload.items() if k != _LEGACY_KEY}
 
+    def test_a_config_that_cannot_be_renamed_is_still_migrated(self, isolated_config):
+        """A single-file Docker bind mount answers EBUSY to the rename while the
+        file itself is writable, and that used to leave the forgeable key in
+        place forever with an error telling the operator it could not be fixed.
+        The writer now falls back to rewriting the file through its own
+        descriptor, so the eviction lands.
+        """
+        _write_config(isolated_config, {_LEGACY_KEY: "a" * 64})
+        before = os.stat(isolated_config).st_ino
+        real_replace = os.replace
+
+        def _busy(src, dst):
+            # Only the CONFIG's own name is unrenameable on such a mount; the
+            # `.backup` beside it is an ordinary file in a writable directory,
+            # and its writer deliberately has no in-place fallback.
+            if str(dst) == str(isolated_config):
+                raise OSError(errno.EBUSY, "Device or resource busy")
+            return real_replace(src, dst)
+
+        with mock.patch("os.replace", _busy):
+            _, secret = _load_and_ensure_secret()
+
+        assert secret == "a" * 64
+        assert _LEGACY_KEY not in json.loads(isolated_config.read_text())
+        assert os.stat(isolated_config).st_ino == before, "the file was replaced after all"
+
+
+class TestStagedConfigCopiesAreReportedNeverAdopted:
+    """A config write that is interrupted while rewriting the file IN PLACE can
+    leave the config unparseable — a failure mode the rename never had — plus one
+    complete staging copy of what it was about to become.
+
+    So the copy is named to the operator, on the one error path that already
+    knows the file did not parse. It is never read: the random suffix is verified
+    against nothing and the config's directory is writable by the account the
+    server runs as, so adopting it would let anyone able to create a file there
+    choose the config the next boot authenticates against.
+    """
+
+    @staticmethod
+    def _stage(config_path, payload):
+        staged = config_path.parent / f"{config_resolve._TEMP_CONFIG_PREFIX}xyz.json"
+        staged.write_text(json.dumps(payload))
+        return staged
+
+    def test_an_unparseable_config_reports_the_staging_copy(self, isolated_config, caplog):
+        isolated_config.write_text("{torn")
+        staged = self._stage(isolated_config, {"viewer": {"edition_password": "recovered"}})
+
+        with caplog.at_level("ERROR"):
+            config, parsed_ok = api_config._read_config()
+
+        assert (config, parsed_ok) == ({}, False)
+        assert str(staged) in caplog.text
+        assert "nothing is restored automatically" in caplog.text
+
+    def test_the_staging_copy_is_never_adopted(self, isolated_config, caplog):
+        """Reporting is the whole feature. A boot that read the copy back would
+        be a stronger write than the legacy-key rewrite already refuses to make
+        on an unparseable file."""
+        isolated_config.write_text("{torn")
+        self._stage(isolated_config, {"viewer": {"edition_password": "attacker"}})
+
+        with caplog.at_level("ERROR"):
+            config, parsed_ok = api_config._read_config()
+
+        assert config == {}, "the staged copy was adopted as the live config"
+        assert not parsed_ok
+        assert api_config.config_load_failed(), "an unreadable config must stay locked"
+        assert isolated_config.read_text() == "{torn"
+
+    def test_a_clean_install_reports_nothing(self, isolated_config, caplog):
+        """The message must not appear for the ordinary syntax error, where there
+        is no copy and nothing to recover from."""
+        isolated_config.write_text("{not valid json")
+
+        with caplog.at_level("ERROR"):
+            api_config._read_config()
+
+        assert "nothing is restored automatically" not in caplog.text
 
 _BURNED = "b" * 64
 

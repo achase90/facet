@@ -18,7 +18,7 @@ import secrets
 from config_resolve import (  # noqa: F401 - atomic_write_json is re-exported for tests that call it here
     _fsync_directory, _merge_into, _unlink_quietly, atomic_write_json,
     default_config_path, defaults_path, delta_for_write, load_defaults,
-    require_override_mapping, write_user_config,
+    require_override_mapping, staged_config_copies, write_user_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -257,6 +257,39 @@ def _read_overrides():
         return json.load(f)
 
 
+def _report_staged_config_copies():
+    """Point the operator at any staging copy left beside an unparseable config.
+
+    ``config_resolve.atomic_write_json`` commits a config write either by
+    renaming its staging copy over the destination or, when that would re-own
+    the operator's file, by rewriting the destination in place. Only the second
+    can leave the config torn — and when it does, the staging copy it kept is
+    the complete config the write was about to produce. This is the one place
+    that both knows the file did not parse and is already telling the operator
+    about it at ERROR, so it is where the copy gets named.
+
+    Nothing is adopted, here or anywhere. The copy's random suffix is verified
+    against nothing and the config's directory is writable by the account the
+    server runs as, so reading the newest match automatically would let anyone
+    able to create a file there choose the config this server next authenticates
+    against — a stronger write than
+    :func:`_read_config_evicting_legacy_share_key` already refuses to make on an
+    unparseable file. Recovery is a human comparing two files.
+    """
+    staged = staged_config_copies(_CONFIG_PATH)
+    if not staged:
+        return
+    logger.error(
+        "%d staged config cop%s sitting beside %s; the newest is %s. A config "
+        "write that was interrupted while rewriting the file in place leaves "
+        "exactly this: a torn config, and one complete copy of what it was "
+        "about to become. Inspect it first, then mv it over the config and "
+        "restart — nothing is restored automatically.",
+        len(staged), "y is" if len(staged) == 1 else "ies are",
+        _CONFIG_PATH, staged[0],
+    )
+
+
 def _read_config():
     """Parse scoring_config.json, tracking whether an existing file failed to parse.
 
@@ -391,6 +424,7 @@ def _read_config():
             "open-install auth path until it does",
             _CONFIG_PATH, exc_info=True,
         )
+        _report_staged_config_copies()
         return {}, False
     _config_load_failed = False
     return config, True
@@ -555,6 +589,17 @@ def _atomic_write_owner_only(path, text):
     deliberately preserves the destination's own (often world-readable) mode —
     the payload can never inherit looser permissions from a file it replaces.
     That makes this the primitive for anything the owner alone should read.
+
+    The asymmetry with :func:`atomic_write_json` goes further than the mode and
+    is deliberate on every axis: that function also adopts the destination's
+    OWNER and will rewrite it through its own inode rather than re-own an
+    operator's config under a rootless container. This one must not. Everything
+    it writes — the server secret store and the pre-migration ``.backup`` — is
+    Facet's OWN file rather than the operator's, has to be 0600 whatever mode
+    and owner happen to be there already, and :func:`_claim_secret_file` resolves
+    the first-boot race between ``--workers>1`` on the ``O_CREAT|O_EXCL`` create
+    plus rename shape specifically. An in-place rewrite would silently keep a
+    loose mode, and a preserved owner is not a property a secret store wants.
 
     The scratch file is named after :data:`_OWNER_ONLY_TMP_PREFIX` rather than
     left to mkstemp's default: the staging copy holds the same bytes as the
@@ -733,11 +778,19 @@ def _read_config_evicting_legacy_share_key():
 
     A rewrite that FAILS is reported and swallowed rather than raised. This
     runs at import of ``api.config``, and the config is not always writable
-    where the server runs: Docker bind-mounts scoring_config.json as a single
-    file, which ``os.replace`` cannot substitute, and read-only config mounts
-    exist. A server that crash-loops on boot is strictly worse than one that
-    starts with a stale key still in the file and tells the operator to delete
-    it — from a crash-loop nobody can even reach the UI to fix it.
+    where the server runs: a read-only config mount is a supported deployment,
+    and a full disk is a fact of life. A server that crash-loops on boot is
+    strictly worse than one that starts with a stale key still in the file and
+    tells the operator to delete it — from a crash-loop nobody can even reach
+    the UI to fix it.
+
+    The single-file Docker bind mount used to be the headline example here, on
+    the grounds that ``os.replace`` cannot substitute it. That is still true of
+    the rename and no longer true of the write:
+    ``config_resolve.atomic_write_json`` falls back to rewriting the file
+    through its own descriptor when the NAME cannot be replaced, so the eviction
+    now succeeds on such a mount. What still reaches this handler is a
+    destination that cannot be written at all.
     """
     with CONFIG_WRITE_LOCK:
         config, parsed_ok = _read_config()
@@ -760,9 +813,11 @@ def _read_config_evicting_legacy_share_key():
         except OSError:
             logger.error(
                 "Could not remove `%s` from %s — the file is not writable here "
-                "(a single-file Docker bind mount or a read-only config mount "
-                "cannot be replaced). DELETE THE KEY BY HAND: while it is there, "
-                "anyone who can read the file can forge any session.",
+                "(a read-only config mount, a full disk, or no permission on "
+                "the file itself; a single-file bind mount is no longer one of "
+                "the reasons, that write now happens in place). DELETE THE KEY "
+                "BY HAND: while it is there, anyone who can read the file can "
+                "forge any session.",
                 _LEGACY_SECRET_KEY, _CONFIG_PATH, exc_info=True,
             )
     if not isinstance(legacy, str) or not legacy.strip():

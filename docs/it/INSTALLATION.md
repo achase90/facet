@@ -245,7 +245,42 @@ viewer, i pesi, le priorità, i contesti di scoring) sopravvive a un
 password del viewer o categorie — vedi
 [Configurazione](CONFIGURATION.md#valori-predefiniti-e-il-tuo-override) per cosa
 mettervi e [il riferimento completo delle chiavi](CONFIGURATION.md) per cosa è
-disponibile. Un file già esistente non viene mai sovrascritto.
+disponibile. Un file già esistente non viene mai sovrascritto — e il suo
+proprietario e i suoi permessi restano intatti. Facet cambia permessi e
+proprietario solo per una configurazione che ha creato lui stesso.
+
+### Proprietà del file nel container
+
+Facet esegue `chown` e `chmod` solo su uno `scoring_config.json` che ha creato lui
+stesso — un file già esistente mantiene per sempre il proprietario e i permessi che
+gli hai dato. L'unica eccezione: se una configurazione preesistente non è
+**leggibile** dall'utente `facet` del container (uid 1000), l'entrypoint ne prende
+comunque possesso e lo segnala su stderr, perché una configurazione illeggibile
+blocca ogni rotta senza alcun modo di raggiungere l'interfaccia per risolverlo.
+Rendi il file leggibile invece di cederlo —
+`chmod o+r facet-config/scoring_config.json` — e Facet lo lascerà stare al
+prossimo avvio.
+
+Anche le scritture di configurazione proprie di Facet (pesi, priorità delle
+categorie, contesti di scoring, la migrazione della password del viewer, …)
+cercano di preservare proprietario e permessi del file, riscrivendolo sul posto
+quando non possono adottare direttamente il proprietario della destinazione. Con
+un normale Podman/Docker rootless questo da solo non basta, perché il tuo file
+appartiene a un uid che l'utente `facet` del container non può diventare — devi
+anche renderlo **scrivibile dall'utente del container senza rinunciare alla tua
+proprietà**:
+
+```bash
+# 100999 = il subuid host a cui è mappato l'utente facet nel container (uid 1000);
+# leggi il tuo da un file già creato dal container: stat -c %u facet-config/.facet_secret
+chown "$USER":100999 facet-config/scoring_config.json
+chmod 664 facet-config/scoring_config.json
+```
+
+Il file resta così tuo e modificabile, e le scritture di Facet lo mantengono
+tale. Alternative: `podman unshare chown` per modificare sul posto un file di
+proprietà del container, oppure `--userns=keep-id` (o un `user:` nel compose)
+perché l'utente del container sia tu.
 
 > **Stai aggiornando da una versione precedente a questa modifica?** Le versioni
 > precedenti indicavano di copiare il file dei valori predefiniti in

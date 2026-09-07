@@ -93,6 +93,17 @@ A destination that resolves outside every mounted volume is refused (`403`) — 
 
 **This is not a container-user permission problem.** The `facet` user's UID inside the container commonly differs from your host account's UID, and that can cause a real, separate filesystem-permission failure on a bind mount — but that happens *after* this path check passes, when the copy/symlink/move actually runs, and it is logged server-side with the underlying OS error for the file that failed. A `403 target_dir is not an allowed export location` (or a generic "access denied" in the UI) happens *before* any file is touched and has nothing to do with UIDs.
 
+### Config File Ownership
+
+The same UID boundary applies to `/config/scoring_config.json` itself. Facet only
+takes ownership of a config it created; an existing file keeps whatever owner and
+mode you gave it, and Facet's own config writes now try to preserve that rather than
+handing the file to whichever uid the container runs as. See
+[Installation — Container file ownership](INSTALLATION.md#container-file-ownership)
+for what is guaranteed, the one case where Facet still takes ownership (a
+pre-existing config the container's `facet` user cannot read), and the recipe for
+making a rootless-Podman-mounted config both yours and writable by the container.
+
 ## Building the Angular Client
 
 The FastAPI server serves the pre-built SPA from `client/dist/client/browser/`. Build it before deployment:

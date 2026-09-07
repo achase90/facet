@@ -365,6 +365,13 @@ only what reading those two will NOT tell you.
 - **Every writer of `scoring_config.json` shares `api.config.CONFIG_WRITE_LOCK`** — priorities,
   weights, contexts, panorama thresholds, the share-secret eviction and the plaintext-password
   upgrade. They rewrite different parts of one file, and two locks lost whole updates.
+- **The config writer has two commit routes.** The default is an atomic rename over the
+  destination; when the destination's owner cannot be adopted (a rootless container, most
+  commonly), it falls back to an inode-preserving in-place rewrite instead — same inode, owner
+  and mode, and the only non-atomic write in the project. That route refuses a symlinked
+  destination via `O_NOFOLLOW`. A crash inside either route leaves the complete replacement in a
+  `.scoring_config.tmp*.json` beside the config, which is reported and never adopted
+  automatically.
 - **Every `ScoringConfig` built inside `api/` goes through `api.config.server_scoring_config()`**,
   never a bare `ScoringConfig()`. The bare form resolves through
   `config.scoring_config.resolve_scoring_config_path`, which prefers a `scoring_config.json` in

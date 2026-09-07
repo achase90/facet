@@ -109,6 +109,12 @@ jobs:
         # fewer imports than a dev venv with the project's own dependencies
         # installed, which reports a different, higher count).
         run: python scripts/check_mypy_ratchet.py
+      - name: docker-entrypoint.sh parses (sh -n)
+        # A syntax error here is a container that never starts -- POSIX sh
+        # gives no other static check, and the Python test suite below drives
+        # behaviour, not parseability. Catches the shape of mistake a shell
+        # edit makes easiest: an unmatched quote or a stray fi/then.
+        run: sh -n docker-entrypoint.sh
       - name: Forbid broken FastAPI auth mock pattern
         run: |
           # Catches both direct ("api.routers.albums.require_edition") and

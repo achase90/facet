@@ -248,7 +248,42 @@ Migration des Viewer-Passworts, Gewichte, Prioritäten, Scoring-Kontexte) einen
 Viewer-Passwort oder Kategorien von Hand anzupassen — siehe
 [Konfiguration](CONFIGURATION.md#standardwerte-und-ihre-überschreibung) dafür, was
 hineingehört, und [die vollständige Schlüsselreferenz](CONFIGURATION.md) dafür, was
-verfügbar ist. Eine bestehende Datei wird nie überschrieben.
+verfügbar ist. Eine bestehende Datei wird nie überschrieben — und ihr Eigentümer
+und ihre Rechte bleiben unangetastet. Facet ändert Rechte und Eigentümer nur bei
+einer Konfiguration, die es selbst angelegt hat.
+
+### Dateibesitz im Container
+
+Facet führt `chown` und `chmod` nur für ein `scoring_config.json` aus, das es selbst
+angelegt hat — eine bereits vorhandene Datei behält dauerhaft den Eigentümer und die
+Rechte, die Sie ihr gegeben haben. Die einzige Ausnahme: Ist eine bereits vorhandene
+Konfiguration für den `facet`-Benutzer des Containers (uid 1000) nicht **lesbar**,
+übernimmt der Entrypoint trotzdem deren Besitz und meldet dies auf stderr — denn eine
+unlesbare Konfiguration sperrt jede Route, ohne dass die Oberfläche zur Behebung
+erreichbar wäre. Machen Sie die Datei stattdessen lesbar —
+`chmod o+r facet-config/scoring_config.json` — dann lässt Facet sie beim nächsten
+Start in Ruhe.
+
+Auch Facets eigene Konfigurationsschreibvorgänge (Gewichte, Kategorie-Prioritäten,
+Scoring-Kontexte, die Migration des Viewer-Passworts, …) versuchen, Eigentümer und
+Rechte der Datei zu erhalten, indem sie an Ort und Stelle überschrieben wird, wenn
+der Eigentümer des Ziels nicht direkt übernommen werden kann. Bei einem gewöhnlichen
+rootless Podman/Docker reicht das allein noch nicht aus, weil Ihre Datei einem uid
+gehört, den der `facet`-Benutzer des Containers nicht annehmen kann — Sie müssen sie
+zusätzlich **für den Container-Benutzer beschreibbar machen, ohne Ihr eigenes
+Eigentum aufzugeben**:
+
+```bash
+# 100999 = die Host-Subuid, auf die der facet-Benutzer im Container (uid 1000) abgebildet wird;
+# Ihre steht auf einer bereits vom Container erzeugten Datei: stat -c %u facet-config/.facet_secret
+chown "$USER":100999 facet-config/scoring_config.json
+chmod 664 facet-config/scoring_config.json
+```
+
+Die Datei bleibt dann Ihre und bearbeitbar, und Facets Schreibvorgänge erhalten das
+so. Alternativen: `podman unshare chown`, um eine dem Container gehörende Datei an
+Ort und Stelle zu bearbeiten, oder `--userns=keep-id` (bzw. eine `user:`-Angabe im
+Compose), damit der Container-Benutzer Sie selbst ist.
 
 > **Sie steigen von einer Version vor dieser Änderung um?** Frühere Versionen rieten
 > dazu, die Standarddatei nach `scoring_config.json` zu kopieren und eine Zeile

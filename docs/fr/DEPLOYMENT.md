@@ -93,6 +93,10 @@ Une destination qui se résout hors de tout volume monté est refusée (`403`) �
 
 **Ce n'est pas un problème de droits de l'utilisateur conteneur.** L'UID de l'utilisateur `facet` à l'intérieur du conteneur diffère couramment de celui de votre compte hôte, et cela peut causer un vrai problème de droits du système de fichiers, distinct, sur un montage bind — mais cela se produit *après* que ce contrôle de chemin a été franchi, quand la copie/le lien symbolique/le déplacement s'exécute réellement, et c'est journalisé côté serveur avec l'erreur système sous-jacente pour le fichier en échec. Un `403 target_dir is not an allowed export location` (ou un « accès refusé » générique dans l'interface) se produit *avant* que le moindre fichier ne soit touché et n'a rien à voir avec les UID.
 
+### Propriété du fichier de configuration
+
+La même limite d'UID s'applique à `/config/scoring_config.json` lui-même. Facet ne prend possession que d'une configuration qu'il a créée ; un fichier déjà présent conserve le propriétaire et les droits que vous lui avez donnés, et les écritures de configuration propres à Facet tentent désormais de le préserver plutôt que de céder le fichier à l'uid sous lequel tourne le conteneur. Voir [Installation — Propriété du fichier en conteneur](INSTALLATION.md#propriété-du-fichier-en-conteneur) pour ce qui est garanti, le seul cas où Facet en prend quand même possession (une configuration préexistante que l'utilisateur `facet` du conteneur ne peut pas lire), et la recette pour qu'une configuration montée sous un Podman rootless reste à la fois vôtre et inscriptible par le conteneur.
+
 ## Compilation du client Angular
 
 Le serveur FastAPI sert la SPA pré-compilée depuis `client/dist/client/browser/`. Compilez-la avant le déploiement :
