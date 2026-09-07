@@ -210,6 +210,26 @@ jobs:
             exit 1
           fi
           echo "requirements.lock.txt (sympy==$base_sympy) and requirements.legacy.lock.txt (sympy==$legacy_sympy) differ only in the sympy pin, as expected."
+          # Packages that api/ imports behind a try/except ImportError which
+          # turns that absence into an HTTP error must be pinned in BOTH
+          # locks -- an extra (pyproject.toml optional-dependencies) never
+          # reaches the Docker/Podman image, which installs only from these
+          # lock files, so a package left extra-only answers HTTP 400 at
+          # runtime for a feature the docs say is available. This is exactly
+          # how send2trash shipped (issue #125): `.[cull]` gated it, the
+          # image never installed it, and POST /api/cull/apply's
+          # trash_rejects action 400'd on every container. List every such
+          # package here as it is added.
+          optional_import_gated_packages=(send2trash)
+          for pkg in "${optional_import_gated_packages[@]}"; do
+            for lock in requirements.lock.txt requirements.legacy.lock.txt; do
+              if ! grep -qiE "^${pkg}==" "$lock"; then
+                echo "::error::'${pkg}' is imported behind a try/except ImportError in api/ and turned into an HTTP error when the import fails, but it is not pinned in ${lock}. An image built from this lock answers HTTP 400 at runtime for a feature the docs say is available. Add '${pkg}==<version>' to ${lock}."
+                exit 1
+              fi
+            done
+          done
+          echo "All optional-import-gated packages (${optional_import_gated_packages[*]}) are pinned in both locks."
       - name: dependabot.yml ignore lists are intact
         # yaml.safe_load is not a sufficient check here: a dropped '-' before
         # a "dependency-name:" line indents that entry into its predecessor,

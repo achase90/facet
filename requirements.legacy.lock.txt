@@ -122,6 +122,7 @@ safetensors==0.8.0
 scikit-image==0.26.0
 scikit-learn==1.9.0
 scipy==1.17.1
+Send2Trash==2.1.0
 sentencepiece==0.2.2
 setuptools==80.10.2
 shellingham==1.5.4
