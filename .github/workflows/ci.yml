@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
           cache: "pip"
       - name: Install test dependencies
-        run: pip install pytest pytest-asyncio pytest-cov fastapi[standard] httpx pyjwt pillow numpy scipy scikit-learn opencv-python-headless tqdm aiosqlite sqlite-vec imagehash psutil watchdog
+        run: pip install pytest pytest-asyncio pytest-cov fastapi[standard] httpx pyjwt pillow numpy scipy scikit-learn opencv-python-headless tqdm aiosqlite sqlite-vec imagehash psutil watchdog send2trash
       - name: Run tests
         run: python -m pytest --tb=short -q --cov=api --cov=processing --cov=analyzers --cov=config --cov=utils --cov-report=term-missing
       - uses: actions/setup-node@v7
@@ -65,7 +65,7 @@ jobs:
           python-version: "3.12"
           cache: "pip"
       - name: Install test dependencies
-        run: pip install pytest pytest-asyncio pytest-cov fastapi[standard] httpx pyjwt pillow numpy scipy scikit-learn opencv-python-headless tqdm aiosqlite sqlite-vec imagehash psutil
+        run: pip install pytest pytest-asyncio pytest-cov fastapi[standard] httpx pyjwt pillow numpy scipy scikit-learn opencv-python-headless tqdm aiosqlite sqlite-vec imagehash psutil send2trash
       - name: Run the platform-sensitive suites
         # Deliberately NOT the whole suite. Much of it hard-codes POSIX paths
         # ("/lib/a.jpg") that no Windows path ever matches, so a full run is
@@ -218,12 +218,26 @@ jobs:
           # runtime for a feature the docs say is available. This is exactly
           # how send2trash shipped (issue #125): `.[cull]` gated it, the
           # image never installed it, and POST /api/cull/apply's
-          # trash_rejects action 400'd on every container. List every such
-          # package here as it is added.
+          # trash_rejects action 400'd on every container.
+          #
+          # This does NOT close the class of bug automatically -- the array
+          # below is hand-maintained, so it only closes the class as far as
+          # whoever adds the next such import remembers to also list it here.
+          # List every such package here as it is added. The class is
+          # currently mechanically derivable (`grep -rn "except ImportError"
+          # api/` returns exactly this one HTTP-converting hit today), which
+          # is a candidate for automating this list instead of hand-tracking
+          # it, should a second hit ever land.
           optional_import_gated_packages=(send2trash)
           for pkg in "${optional_import_gated_packages[@]}"; do
             for lock in requirements.lock.txt requirements.legacy.lock.txt; do
-              if ! grep -qiE "^${pkg}==" "$lock"; then
+              # Anchored to a bare `pkg==<version>` line: `[^;]*$` rejects a
+              # trailing PEP 508 environment marker (e.g.
+              # `send2trash==2.1.0 ; sys_platform == "win32"`), which would
+              # otherwise pass this gate while pip installs nothing on the
+              # platforms that marker excludes -- the exact "pinned but never
+              # installed" shape this gate exists to catch.
+              if ! grep -qiE "^${pkg}==[0-9][^;]*\$" "$lock"; then
                 echo "::error::'${pkg}' is imported behind a try/except ImportError in api/ and turned into an HTTP error when the import fails, but it is not pinned in ${lock}. An image built from this lock answers HTTP 400 at runtime for a feature the docs say is available. Add '${pkg}==<version>' to ${lock}."
                 exit 1
               fi
