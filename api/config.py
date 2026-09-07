@@ -1231,6 +1231,34 @@ def load_viewer_config(config=None):
 VIEWER_CONFIG = load_viewer_config(_FULL_CONFIG)
 
 
+def cull_allow_trash(viewer_config: dict) -> bool:
+    """Whether OS-trash culling (``POST /api/cull/apply``'s ``trash_rejects``
+    action) is enabled, per ``viewer.cull.allow_trash``.
+
+    Shared by ``api/routers/export.py`` (which enforces it) and
+    ``api/routers/gallery.py`` (which reports it via ``GET /api/config`` so
+    the client can hide the action rather than let the user hit the 403).
+    Coerces with ``bool()`` -- plain Python truthiness, matching the ``and``
+    export.py already used before this helper existed -- so both readers
+    agree for every possible stored value, including the ones the schema
+    doesn't fully constrain (``null``, a non-boolean string like
+    ``"enabled"``, or the ambiguous ``"false"``, which is a non-empty string
+    and therefore reads as ENABLED).
+
+    Takes ``viewer_config`` as a parameter rather than reading
+    ``api.config.VIEWER_CONFIG`` directly: both callers bind their own
+    module-level name via ``from api.config import VIEWER_CONFIG``, and
+    ``tests/test_cull.py`` patches those bound names (e.g.
+    ``mock.patch("api.routers.gallery.VIEWER_CONFIG", ...)``). A helper that
+    read ``api.config``'s own global instead would never see a patch applied
+    to a *different* module's name for it -- the test would keep exercising
+    the real config and pass regardless of what it patched, the same
+    pass-by-accident failure mode CLAUDE.md documents for ``mock.patch`` on
+    a FastAPI auth dependency captured inside ``Depends()``.
+    """
+    return bool((viewer_config.get('cull', {}) or {}).get('allow_trash', False))
+
+
 def get_xmp_export_config():
     """Return the ``xmp_export`` config block (score-to-stars mapping etc.)."""
     return _FULL_CONFIG.get('xmp_export', {})

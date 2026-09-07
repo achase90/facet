@@ -2314,6 +2314,8 @@
     "copy_keeps": "Behaltene in Ordner kopieren",
     "move_rejects": "Abgelehnte in Ordner verschieben",
     "trash_rejects": "Abgelehnte in den Papierkorb",
+    "trash_disabled": "Papierkorb-Funktion ist deaktiviert — ein Administrator kann sie über viewer.cull.allow_trash aktivieren.",
+    "trash_missing_pkg": "Der Papierkorb ist auf diesem Server nicht verfügbar — das Paket send2trash ist nicht installiert.",
     "target_dir": "Zielordner",
     "include_companions": "Zugehörige RAW / XMP einbeziehen",
     "include_sequence_siblings": "Zugehörige Bilder einbeziehen (Belichtungsreihe/Panorama)",

@@ -1340,7 +1340,14 @@ export class GalleryComponent implements OnInit, OnDestroy {
     const paths = [...this.selectedPaths()];
     if (!paths.length) return;
     const { CullDialogComponent } = await import('./cull-dialog.component');
-    const ref = this.dialog.open(CullDialogComponent, { width: '32rem', data: { paths } });
+    const ref = this.dialog.open(CullDialogComponent, {
+      width: '32rem',
+      data: {
+        paths,
+        trashAvailable: this.store.config()?.cull?.trash_available ?? false,
+        allowTrash: this.store.config()?.cull?.allow_trash ?? false,
+      },
+    });
     const applied = await firstValueFrom(ref.afterClosed());
     if (applied) {
       this.clearSelection();

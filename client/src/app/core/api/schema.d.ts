@@ -4784,6 +4784,25 @@ export interface components {
             /** Would Trash */
             would_trash?: string[] | null;
         };
+        /**
+         * CullCapabilities
+         * @description Whether ``POST /api/cull/apply``'s ``trash_rejects`` action can succeed.
+         *
+         *     Two booleans, not one, because the endpoint has two independent refusals
+         *     for that action -- 403 when ``viewer.cull.allow_trash`` is off, 400 when
+         *     the ``send2trash`` package is missing -- and a client that hides the
+         *     "Trash rejects" option needs to say which cause applies rather than just
+         *     that trashing won't work. ``allow_trash`` mirrors the config value as-is
+         *     so the client can explain "an operator disabled this"; ``trash_available``
+         *     is the AND of both conditions and is what should actually gate showing
+         *     the option in the first place.
+         */
+        CullCapabilities: {
+            /** Allow Trash */
+            allow_trash: boolean;
+            /** Trash Available */
+            trash_available: boolean;
+        };
         /** CullProfile */
         CullProfile: {
             /** Eyes Closed Max */
@@ -6915,6 +6934,7 @@ export interface components {
             clipping: {
                 [key: string]: unknown;
             };
+            cull: components["schemas"]["CullCapabilities"];
             /**
              * Cull Styles
              * @default []

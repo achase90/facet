@@ -2314,6 +2314,8 @@
     "copy_keeps": "Copiar mantidas para a pasta",
     "move_rejects": "Mover rejeitadas para a pasta",
     "trash_rejects": "Descartar rejeitadas (para a lixeira do sistema)",
+    "trash_disabled": "A lixeira está desativada — um administrador pode ativá-la em viewer.cull.allow_trash.",
+    "trash_missing_pkg": "A lixeira não está disponível neste servidor — o pacote send2trash não está instalado.",
     "target_dir": "Pasta de destino",
     "include_companions": "Incluir RAW / XMP associados",
     "include_sequence_siblings": "Incluir quadros associados (bracketing/panorâmica)",

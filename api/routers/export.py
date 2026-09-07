@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from api.auth import CurrentUser, require_edition
-from api.config import VIEWER_CONFIG, get_all_scan_directories
+from api.config import VIEWER_CONFIG, cull_allow_trash, get_all_scan_directories
 from api.database import get_db
 from api.db_helpers import (
     PANORAMA_KINDS_SQL,
@@ -774,13 +774,21 @@ def api_cull_apply(
         return respond(False, errors, moved=moved)
 
     # trash_rejects
-    if not (VIEWER_CONFIG.get("cull", {}) or {}).get("allow_trash", False):
+    if not cull_allow_trash(VIEWER_CONFIG):
         raise HTTPException(status_code=403,
                             detail="OS-trash is disabled — set viewer.cull.allow_trash to enable")
     try:
         import send2trash
     except ImportError:
-        raise HTTPException(status_code=400, detail="send2trash is not installed")
+        # This action's own import re-runs every request, so it recovers the
+        # moment the package lands in the venv -- but GET /api/config's
+        # trash_available flag (api/routers/gallery.py's HAS_SEND2TRASH) is a
+        # module-scope constant set once at process start, so the UI keeps
+        # hiding this action until the server restarts even though a retry
+        # here would now succeed. Tell the operator both things.
+        raise HTTPException(status_code=400,
+                            detail="send2trash ships with Facet — upgrade the image or run pip install send2trash, "
+                                    "then restart the server so the UI stops hiding this option")
     if body.dry_run:
         return respond(True, [], would_trash=files)
     trashed = errors = 0

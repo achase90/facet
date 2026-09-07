@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from api.auth import CurrentUser, get_optional_user
-from api.config import VIEWER_CONFIG, _FULL_CONFIG
+from api.config import VIEWER_CONFIG, _FULL_CONFIG, cull_allow_trash
 from api.database import get_async_db, get_db
 from api.models.gallery import GalleryParams, Photo, PhotosResponse
 from api.models.discovery import PhotoSetResponse, PhotoTypeCountsResponse, ViewerConfigResponse
@@ -34,6 +34,12 @@ from api.types import (
 )
 from utils.histogram import unpack_histogram
 from utils.sequence import BRACKET as BRACKET_KIND
+
+try:
+    import send2trash  # noqa: F401
+    HAS_SEND2TRASH = True
+except ImportError:
+    HAS_SEND2TRASH = False
 
 router = APIRouter(tags=["gallery"])
 logger = logging.getLogger(__name__)
@@ -1424,6 +1430,30 @@ def _social_export_presets() -> dict:
     return {'presets': presets}
 
 
+def _cull_capabilities() -> dict:
+    """Whether the ``trash_rejects`` action on ``/api/cull/apply`` can succeed.
+
+    Mirrors that endpoint's own two-part refusal (``export.py``): a 403 when
+    ``viewer.cull.allow_trash`` is off, a 400 when the ``send2trash`` package
+    is missing. ``allow_trash`` goes through the shared
+    ``api.config.cull_allow_trash`` helper -- the same one ``export.py``
+    calls before it acts -- so both readers coerce the raw config value with
+    the same Python-truthiness rule and can never disagree about whether
+    trashing is enabled, however the operator wrote the value.
+
+    ``send2trash``'s importability is read from the module-scope
+    ``HAS_SEND2TRASH`` constant (set once, at import time, the same idiom
+    ``db.connection`` uses for ``HAS_SQLITE_VEC``) rather than probed here.
+    That constant is fixed for the life of the process: a ``pip install
+    send2trash`` into a running venv is not reflected until the server
+    restarts, so ``trash_available`` can keep reporting ``false`` right
+    after an operator installs the package -- see the restart guidance on
+    ``export.py``'s matching 400 detail.
+    """
+    allow_trash = cull_allow_trash(VIEWER_CONFIG)
+    return {'allow_trash': allow_trash, 'trash_available': allow_trash and HAS_SEND2TRASH}
+
+
 def _render_migration_status():
     """How many RAW rows still carry a thumbnail from the old render profile.
 
@@ -1490,6 +1520,7 @@ def api_config(user: Optional[CurrentUser] = Depends(get_optional_user)):
         'quality_thresholds': VIEWER_CONFIG['quality_thresholds'],
         'social_export': _social_export_presets(),
         'cull_styles': get_cull_styles(),
+        'cull': _cull_capabilities(),
         'moment_confidence_min': VIEWER_CONFIG.get('moment_confidence_min', 0),
         'notification_duration_ms': VIEWER_CONFIG.get('notification_duration_ms', 2000),
         'translation_target_language': _FULL_CONFIG.get('translation', {}).get('target_language', ''),

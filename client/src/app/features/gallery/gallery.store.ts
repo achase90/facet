@@ -159,6 +159,9 @@ export interface ViewerConfig {
   };
   /** Named darktable styles for the edited-look cull preview. Empty/absent = feature hidden. */
   cull_styles?: { name: string; label_key: string }[];
+  /** Whether the "Trash rejects" cull action can succeed server-side (config allows it AND
+   *  send2trash is importable). Absent/undefined reads as unavailable (fail-closed). */
+  cull?: { allow_trash: boolean; trash_available: boolean };
   /** RAW rows whose stored thumbnail still comes from the pre-fix rendering.
    *  Served from the stats cache, so it is an estimate that trails the last refresh
    *  by at most one TTL — never a number to drive anything but the advisory banner. */

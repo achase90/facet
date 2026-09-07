@@ -2314,6 +2314,8 @@
     "copy_keeps": "Copier les gardés vers un dossier",
     "move_rejects": "Déplacer les rejetés vers un dossier",
     "trash_rejects": "Mettre les rejetés à la corbeille",
+    "trash_disabled": "Mise à la corbeille désactivée — un administrateur peut l'activer via viewer.cull.allow_trash.",
+    "trash_missing_pkg": "Mise à la corbeille indisponible sur ce serveur — le paquet send2trash n'est pas installé.",
     "target_dir": "Dossier cible",
     "include_companions": "Inclure le RAW / XMP associé",
     "include_sequence_siblings": "Inclure les images associées (bracketing/panorama)",
