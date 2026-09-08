@@ -321,7 +321,7 @@ describe('PhotoDetailComponent', () => {
 
   describe('toggleFavorite', () => {
     it('should toggle favorite status via API', async () => {
-      mockApi.post.mockReturnValue(of({ is_favorite: true, is_rejected: null }));
+      mockApi.post.mockReturnValue(of({ is_favorite: true, is_rejected: false }));
       createComponent();
       component.photo.set({ ...samplePhoto, is_favorite: false, is_rejected: false });
 
@@ -538,14 +538,18 @@ describe('PhotoDetailComponent', () => {
       expect(stored().is_rejected).toBe(false);
     });
 
+    // `is_rejected: null` is the un-favouriting branch and only that one: the
+    // endpoint answers from a single expression keyed on the new value, so it
+    // pairs the null with `is_favorite: false` and never with `true`. Seeding a
+    // favourited photo and clearing it is the only way to reach the guard.
     it('toggleFavorite leaves the stored reject flag alone when the server sends null', async () => {
-      mockApi.post.mockReturnValue(of({ is_favorite: true, is_rejected: null }));
+      mockApi.post.mockReturnValue(of({ is_favorite: false, is_rejected: null }));
       createComponent();
-      seedGrid({ is_favorite: false, is_rejected: true });
+      seedGrid({ is_favorite: true, is_rejected: true });
 
       await component.toggleFavorite(edited.path);
 
-      expect(stored().is_favorite).toBe(true);
+      expect(stored().is_favorite).toBe(false);
       expect(stored().is_rejected).toBe(true);
     });
 
