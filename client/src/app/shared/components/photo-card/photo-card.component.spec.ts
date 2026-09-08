@@ -657,4 +657,16 @@ describe('PhotoCardComponent current-photo marker', () => {
     expect(classes.contains('scroll-mb-20')).toBe(true);
     expect(classes.contains('scroll-mt-2')).toBe(true);
   });
+
+  it('carries the class that cancels the dimming under "reduce transparency"', () => {
+    // jsdom cannot evaluate `prefers-reduced-transparency`, so this only proves
+    // the class is BOUND to the host, not that the media query wins the
+    // cascade at runtime -- that is proven separately against the built
+    // production stylesheet, where `.reduce-transparency\:opacity-100` (inside
+    // the `@media (prefers-reduced-transparency: reduce)` block) must appear
+    // AFTER the plain `.opacity-50` rule, since both are single-class
+    // selectors and source order, not specificity, decides which wins.
+    const classes = host(createCard({ isActive: false, gridHasActiveCard: true })).classList;
+    expect(classes.contains('reduce-transparency:opacity-100')).toBe(true);
+  });
 });

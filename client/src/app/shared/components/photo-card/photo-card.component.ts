@@ -82,7 +82,7 @@ const DEFAULT_CLIPPING_BADGE_PERCENT = 5;
     // conditional class. The top asks for nothing but that same outline kept
     // off the scrollport's edge, since nothing in the shell is fixed or sticky
     // above the grid.
-    class: 'scroll-mt-2 scroll-mb-20',
+    class: 'scroll-mt-2 scroll-mb-20 reduce-transparency:opacity-100',
     // The current-photo marker, and the dimming of every card that is not it.
     // Both sit on the host rather than on the tile below, because the host's
     // own `content-visibility: auto` brings paint containment with it, and that
@@ -102,6 +102,9 @@ const DEFAULT_CLIPPING_BADGE_PERCENT = 5;
     // The hosts are flex/grid items, so this applies without positioning them.
     // Well under the action bar (z-50) and the scroll-to-top button (z-40).
     '[class.z-10]': 'isActive()',
+    // Users who set "reduce transparency" get the outline and aria-current
+    // above without this large-area translucency: the static
+    // reduce-transparency:opacity-100 class cancels it back to full opacity.
     '[class.opacity-50]': 'isDimmed()',
   },
   imports: [
