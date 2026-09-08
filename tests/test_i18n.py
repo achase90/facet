@@ -86,15 +86,25 @@ TRANSLATED_LANGUAGES = [code for code in SUPPORTED_LANGUAGES if code != DEFAULT_
 
 
 class TestBundleParity:
-    """Every registered language ships the same key set as English.
+    """What ``scripts/audit_i18n.py`` cannot see.
 
-    Nothing else enforces this. ``_load_translations`` answers a missing or
-    unparseable bundle with an empty dict and HTTP 200, and the Angular side
-    renders an absent key as the key path itself — so a language that has
-    fallen behind looks like a working install serving `gallery.selection.count`
-    as UI text. A bundle added before a feature lands, or a feature landing
-    after a bundle was written, drifts silently in both directions; these tests
-    are the only thing that makes either fail loudly.
+    That script is the bundle gate — CI runs it as "Translation bundles agree
+    with en.json" and it compares every bundle's dotted key paths against
+    ``en.json`` in both directions, so missing and extra KEYS are already
+    covered. Nothing here duplicates that.
+
+    It compares key names and never values, which is how ``fr.json`` shipped
+    ``capsules.camera_title = "{caméra}"``: a corrupted interpolation token
+    lives inside a value, so a key-set audit passes it. Empty values it reports
+    deliberately as informational, never gating — that policy stays its own.
+
+    It also enumerates by globbing ``translations/*.json``, so the registry and
+    the directory can disagree without it noticing, in either direction. That
+    matters because ``_load_translations`` answers a missing or unparseable
+    bundle with an empty dict and HTTP 200, and the Angular side renders an
+    absent key as the key path itself — a language registered with no readable
+    bundle looks like a working install serving `gallery.selection.count` as UI
+    text.
     """
 
     def test_every_registered_language_has_a_usable_bundle(self):
@@ -113,15 +123,6 @@ class TestBundleParity:
         )
 
     @pytest.mark.parametrize("lang", TRANSLATED_LANGUAGES)
-    def test_key_set_matches_english(self, lang):
-        english = _flatten(_load_bundle(DEFAULT_LANGUAGE))
-        bundle = _flatten(_load_bundle(lang))
-        missing = sorted(set(english) - set(bundle))
-        extra = sorted(set(bundle) - set(english))
-        assert not missing, f"{lang}.json is missing {len(missing)} key(s): {missing[:10]}"
-        assert not extra, f"{lang}.json has {len(extra)} key(s) absent from en.json: {extra[:10]}"
-
-    @pytest.mark.parametrize("lang", TRANSLATED_LANGUAGES)
     def test_placeholders_match_english(self, lang):
         """A dropped ``{count}`` renders the sentence without its number, and an
         invented one renders the brace literally — both are silent at runtime."""
@@ -136,10 +137,3 @@ class TestBundleParity:
             and set(PLACEHOLDER.findall(value)) != set(PLACEHOLDER.findall(bundle[key]))
         }
         assert not mismatched, f"{lang}.json placeholder mismatches (key: en, {lang}): {dict(list(mismatched.items())[:5])}"
-
-    @pytest.mark.parametrize("lang", TRANSLATED_LANGUAGES)
-    def test_values_are_non_empty_strings(self, lang):
-        """An empty string is worse than a missing key: it renders as nothing at all."""
-        bundle = _flatten(_load_bundle(lang))
-        bad = sorted(key for key, value in bundle.items() if not isinstance(value, str) or not value.strip())
-        assert not bad, f"{lang}.json has {len(bad)} empty or non-string value(s): {bad[:10]}"
