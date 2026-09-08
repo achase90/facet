@@ -1078,7 +1078,18 @@
       "mark_panorama": "标记为同一组全景照片",
       "mark_hdr_panorama": "标记为同一组 HDR 全景照片",
       "marked_panorama": "已将 {count} 张照片标记为同一组全景照片",
-      "mark_needs_two": "请至少选择两张照片"
+      "mark_needs_two": "请至少选择两张照片",
+      "mark_needs_paths": "请逐张选择照片，整个视图的选择无法标记为一组",
+      "mark_too_many": "一组最多包含 {max} 张照片，当前已选 {count} 张",
+      "view_scope_active": "已选中整个视图，共 {count} 张照片",
+      "view_scope_offer": "已加载的 {count} 张照片已全部选中。",
+      "view_scope_select_all": "选择此视图中的全部 {total} 张",
+      "view_scope_confirm_title": "应用于整个视图？",
+      "view_scope_confirm_message": "此操作将修改符合当前筛选条件的 {count} 张照片，包括尚未在屏幕上加载的照片。是否继续？",
+      "view_scope_mismatch": "实际修改了 {count} 张照片，而非预告的 {announced} 张，操作执行期间视图发生了变化",
+      "view_scope_empty": "已没有符合当前筛选条件的照片",
+      "download_confirm_title": "下载 {count} 张照片？",
+      "download_confirm_message": "每张照片都会单独下载为一个文件。{count} 张需要较长时间，并可能导致浏览器不堪重负。"
     },
     "keep_top": {
       "label": "保留前若干 %",
@@ -2314,6 +2325,8 @@
     "copy_keeps": "将保留照片复制到文件夹",
     "move_rejects": "将淘汰照片移至文件夹",
     "trash_rejects": "将淘汰照片移入系统回收站",
+    "trash_disabled": "回收站功能已禁用，管理员可通过 viewer.cull.allow_trash 启用。",
+    "trash_missing_pkg": "此服务器无法使用系统回收站，未安装 send2trash 软件包。",
     "target_dir": "目标文件夹",
     "include_companions": "包含配套的 RAW／XMP 文件",
     "include_sequence_siblings": "包含同组其他照片（包围曝光／全景组）",
