@@ -14,6 +14,7 @@ import {
   TemplateRef,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { LiveAnnouncer } from '@angular/cdk/a11y';
 import { MatSidenav, MatSidenavModule, MatSidenavContent } from '@angular/material/sidenav';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatIconModule } from '@angular/material/icon';
@@ -524,7 +525,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
             <button mat-button class="!text-xs" (click)="selectWholeView()">{{ I18N.gallery.selection.view_scope_select_all | translate:{ total: store.total() } }}</button>
           </div>
         }
-        <span class="text-sm font-medium shrink-0">{{ (viewScoped() ? I18N.gallery.selection.view_scope_active : I18N.gallery.selection.count) | translate:{ count: selectionCount() } }}</span>
+        <span data-selection-status tabindex="-1" class="text-sm font-medium shrink-0">{{ (viewScoped() ? I18N.gallery.selection.view_scope_active : I18N.gallery.selection.count) | translate:{ count: selectionCount() } }}</span>
         <div class="flex items-center gap-0 lg:gap-2">
           <button mat-icon-button class="lg:!hidden" (click)="clearSelection()" [matTooltip]="I18N.gallery.selection.clear | translate" [attr.aria-label]="I18N.gallery.selection.clear | translate"><mat-icon>close</mat-icon></button>
           <button mat-button class="!hidden lg:!inline-flex" (click)="clearSelection()"><mat-icon>close</mat-icon> {{ I18N.gallery.selection.clear | translate }}</button>
@@ -632,6 +633,7 @@ export class GalleryComponent implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
   private readonly pageHelp = inject(PageHelpService);
   private readonly headerSlot = inject(HeaderSlotService);
+  private readonly liveAnnouncer = inject(LiveAnnouncer);
   private readonly galleryToolbar = viewChild<TemplateRef<unknown>>('galleryToolbar');
 
   // Album options for "Add to album" menu
@@ -1144,14 +1146,47 @@ export class GalleryComponent implements OnInit, OnDestroy {
    */
   protected selectAll(): void {
     this.store.selectAll();
+    this.anchorFocusAndAnnounceSelectionStatus();
   }
 
   protected invertSelection(): void {
     this.store.invertSelection();
+    this.announceSelectionStatus();
   }
 
   protected selectWholeView(): void {
     this.store.selectWholeView();
+    this.anchorFocusAndAnnounceSelectionStatus();
+  }
+
+  /**
+   * Announce the selection the way the bar states it, reusing the count span's
+   * own translated text rather than adding a string all six language bundles
+   * would need. Every widening action announces; only the two that destroy
+   * their own button also move focus, below.
+   */
+  private announceSelectionStatus(): void {
+    const key = this.viewScoped() ? I18N.gallery.selection.view_scope_active : I18N.gallery.selection.count;
+    void this.liveAnnouncer.announce(this.i18n.t(key, { count: this.selectionCount() }));
+  }
+
+  /**
+   * Both whole-view toggle buttons ("select all in view" and its sibling
+   * "select all") live inside an `@if` keyed on the very selection state their
+   * own click flips (`offerWholeView()` / `allLoadedSelected()`), so Angular
+   * removes the still-focused button on the same tick and focus falls back to
+   * `document.body` with nothing announced. The selection-count span right
+   * after them states the new count either way and is never removed by either
+   * toggle, so it serves as the focus anchor (`tabindex="-1"` keeps it out of
+   * the tab order).
+   *
+   * Invert deliberately does NOT come through here: its button survives its own
+   * click, so moving focus would cost a keyboard user the place they need to
+   * press it again.
+   */
+  private anchorFocusAndAnnounceSelectionStatus(): void {
+    document.querySelector<HTMLElement>('[data-selection-status]')?.focus();
+    this.announceSelectionStatus();
   }
 
   /** Two panes is the smallest useful compare; past four they are too small to read. */

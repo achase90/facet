@@ -5,6 +5,7 @@ import { ActivatedRoute } from '@angular/router';
 import { Subject, of, throwError } from 'rxjs';
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
+import { LiveAnnouncer } from '@angular/cdk/a11y';
 import { GalleryStore, GalleryFilters, DEFAULT_FILTERS } from './gallery.store';
 import { buildApiParams, DISPLAY_OPTIONS_KEY } from './gallery-filters.util';
 import { ApiService } from '../../core/services/api.service';
@@ -21,7 +22,7 @@ describe('GalleryComponent', () => {
 
    
   let mockStore: any;
-  let mockApi: { thumbnailUrl: Mock; post: Mock };
+  let mockApi: { thumbnailUrl: Mock; post: Mock; downloadUrl: Mock; getRaw: Mock };
   let mockAuth: Record<string, unknown>;
   let mockI18n: { t: Mock };
   let routeMock: { snapshot: { paramMap: { get: Mock }; queryParams: Record<string, string> } };
@@ -102,6 +103,8 @@ describe('GalleryComponent', () => {
     mockApi = {
       thumbnailUrl: vi.fn((path: string) => `/thumbnail?path=${path}`),
       post: vi.fn(() => of({ success: true, overridden: 0, skipped: 0, kind: null })),
+      downloadUrl: vi.fn((path: string) => `/download?path=${path}`),
+      getRaw: vi.fn(() => of(new Blob(['x']))),
     };
 
     mockAuth = { isEdition: vi.fn(() => false) };
@@ -121,6 +124,7 @@ describe('GalleryComponent', () => {
         { provide: AlbumService, useValue: { list: vi.fn(() => of({ albums: [] })), get: vi.fn(() => of({})) } },
         { provide: ActivatedRoute, useValue: routeMock },
         { provide: MatDialog, useValue: { open: vi.fn() } },
+        { provide: LiveAnnouncer, useValue: { announce: vi.fn(() => Promise.resolve()) } },
         // Returns a ref stub, not undefined: UndoService reads onAction() /
         // afterDismissed() off whatever open() hands back.
         {
@@ -899,6 +903,92 @@ describe('GalleryComponent', () => {
       });
     });
 
+    // Both "select all in view" and its sibling "select all" render inside an
+    // @if keyed on the very selection state their own click flips, so Angular
+    // removes the still-focused button on the same tick that the click
+    // handler runs. Without focus restoration the browser drops focus to
+    // document.body and announces nothing.
+    describe('focus and announcement when a toggle button removes itself', () => {
+      let liveAnnouncer: { announce: Mock };
+      let statusEl: HTMLElement;
+      let vanishingButton: HTMLElement;
+
+      beforeEach(() => {
+        liveAnnouncer = TestBed.inject(LiveAnnouncer) as unknown as { announce: Mock };
+        // Stand-ins for the real template markup: the always-rendered status
+        // span the fix anchors focus to, and the button the click originated
+        // from -- which the real @if would remove right after.
+        statusEl = document.createElement('span');
+        statusEl.setAttribute('data-selection-status', '');
+        statusEl.tabIndex = -1;
+        document.body.appendChild(statusEl);
+        vanishingButton = document.createElement('button');
+        document.body.appendChild(vanishingButton);
+        vanishingButton.focus();
+      });
+
+      afterEach(() => {
+        statusEl.remove();
+        vanishingButton.remove();
+      });
+
+      it('moves focus off the "select all in view" button onto the status text', () => {
+        mockStore.viewScopeSelected.set(true);
+        mockStore.selectionCount.set(650);
+        expect(document.activeElement).toBe(vanishingButton);
+
+        (component as unknown as { selectWholeView: () => void }).selectWholeView();
+
+        expect(document.activeElement).toBe(statusEl);
+        expect(document.activeElement).not.toBe(document.body);
+      });
+
+      it('announces the new whole-view selection state', () => {
+        mockStore.viewScopeSelected.set(true);
+        mockStore.selectionCount.set(650);
+
+        (component as unknown as { selectWholeView: () => void }).selectWholeView();
+
+        expect(liveAnnouncer.announce).toHaveBeenCalledWith('gallery.selection.view_scope_active');
+      });
+
+      it('moves focus off the sibling "select all" button onto the status text', () => {
+        mockStore.selectionCount.set(2);
+        expect(document.activeElement).toBe(vanishingButton);
+
+        (component as unknown as { selectAll: () => void }).selectAll();
+
+        expect(document.activeElement).toBe(statusEl);
+        expect(document.activeElement).not.toBe(document.body);
+      });
+
+      it('announces the new selection count from the sibling "select all" button', () => {
+        mockStore.selectionCount.set(2);
+
+        (component as unknown as { selectAll: () => void }).selectAll();
+
+        expect(liveAnnouncer.announce).toHaveBeenCalledWith('gallery.selection.count');
+      });
+
+      it('announces the new count when the selection is inverted', () => {
+        mockStore.selectionCount.set(7);
+
+        (component as unknown as { invertSelection: () => void }).invertSelection();
+
+        expect(liveAnnouncer.announce).toHaveBeenCalledWith('gallery.selection.count');
+      });
+
+      it('leaves focus on the invert button, which survives its own click', () => {
+        mockStore.selectionCount.set(7);
+        expect(document.activeElement).toBe(vanishingButton);
+
+        (component as unknown as { invertSelection: () => void }).invertSelection();
+
+        expect(document.activeElement).toBe(vanishingButton);
+        expect(document.activeElement).not.toBe(statusEl);
+      });
+    });
+
     describe('confirming a mutation that runs over the whole view', () => {
       let dialog: MatDialog;
       let snackOpen: Mock;
@@ -943,6 +1033,20 @@ describe('GalleryComponent', () => {
 
         expect(dialog.open).not.toHaveBeenCalled();
         expect(mockStore.batchFavorite).not.toHaveBeenCalled();
+      });
+
+      // The server total minus what the user unticked can land on zero — the
+      // whole view was already excluded down to nothing. That must short-
+      // circuit before the confirm dialog, not open it to confirm acting on 0.
+      it('tells the user there is nothing to act on when exclusions cover the whole view', async () => {
+        mockStore.excludedPaths.set(new Set(['/a.jpg', '/b.jpg']));
+        mockStore.countInView.mockResolvedValue(2);
+
+        await favorite();
+
+        expect(dialog.open).not.toHaveBeenCalled();
+        expect(mockStore.batchFavorite).not.toHaveBeenCalled();
+        expect(snackOpen.mock.calls.some(c => c[0] === 'gallery.selection.view_scope_empty')).toBe(true);
       });
 
       // The user approved a number; if the view moved under the write, say so
@@ -1078,6 +1182,22 @@ describe('GalleryComponent', () => {
       expect(mockApi.post).not.toHaveBeenCalled();
     });
 
+    // The server caps a sequence correction at MARK_SEQUENCE_MAX_PHOTOS (500)
+    // frames; a set is a handful of frames one camera shot together, never
+    // hundreds, so this refusal is client-side, before any request is sent.
+    it('refuses more paths than the server-side correction cap', async () => {
+      const paths = Array.from({ length: 501 }, (_, i) => `/p${i}.jpg`);
+      select(paths);
+      const snackOpen = TestBed.inject(MatSnackBar).open as Mock;
+
+      await mark();
+
+      expect(mockApi.post).not.toHaveBeenCalled();
+      expect(mockStore.patchSequenceOverride).not.toHaveBeenCalled();
+      expect(mockStore.clearSelection).not.toHaveBeenCalled();
+      expect(snackOpen.mock.calls.some(c => c[0] === 'gallery.selection.mark_too_many')).toBe(true);
+    });
+
     it('marks nothing when the server refuses', async () => {
       select(['/a.jpg', '/b.jpg']);
       mockApi.post.mockReturnValueOnce(throwError(() => new Error('nope')));
@@ -1086,6 +1206,52 @@ describe('GalleryComponent', () => {
 
       expect(mockStore.patchSequenceOverride).not.toHaveBeenCalled();
       expect(mockStore.clearSelection).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('downloadSelected', () => {
+    function select(paths: string[]) {
+      mockStore.selectedPaths.set(new Set(paths));
+      mockStore.selectionCount.set(paths.length);
+    }
+
+    const download = () =>
+      (component as unknown as { downloadSelected: () => Promise<void> }).downloadSelected();
+
+    // Past DOWNLOAD_CONFIRM_PHOTOS (50), a download is one blob fetch plus one
+    // synthetic anchor click PER PHOTO, serially -- confirm before starting
+    // something that size by accident.
+    it('asks for confirmation before downloading more than DOWNLOAD_CONFIRM_PHOTOS photos', async () => {
+      select(Array.from({ length: 51 }, (_, i) => `/p${i}.jpg`));
+      const dialog = TestBed.inject(MatDialog);
+      (dialog.open as Mock).mockReturnValue({ afterClosed: () => of(false) });
+
+      await download();
+
+      expect(dialog.open).toHaveBeenCalled();
+      expect((dialog.open as Mock).mock.calls[0][1].data.message)
+        .toBe('gallery.selection.download_confirm_message');
+      expect(mockApi.getRaw).not.toHaveBeenCalled();
+    });
+
+    it('downloads once an oversized selection is confirmed', async () => {
+      select(Array.from({ length: 51 }, (_, i) => `/p${i}.jpg`));
+      const dialog = TestBed.inject(MatDialog);
+      (dialog.open as Mock).mockReturnValue({ afterClosed: () => of(true) });
+
+      await download();
+
+      expect(mockApi.getRaw).toHaveBeenCalled();
+    });
+
+    it('downloads without confirming at or under the limit', async () => {
+      select(Array.from({ length: 50 }, (_, i) => `/p${i}.jpg`));
+      const dialog = TestBed.inject(MatDialog);
+
+      await download();
+
+      expect(dialog.open).not.toHaveBeenCalled();
+      expect(mockApi.getRaw).toHaveBeenCalled();
     });
   });
 });
