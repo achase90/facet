@@ -644,7 +644,7 @@ describe('PhotoCardComponent current-photo marker', () => {
     // which stops at the scrollport's edge and knows nothing of the action bar
     // fixed across the bottom of it.
     const classes = host(createCard()).classList;
-    expect(classes.contains('scroll-mb-20')).toBe(true);
+    expect(classes.contains('scroll-mb-28')).toBe(true);
     expect(classes.contains('scroll-mt-2')).toBe(true);
   });
 
@@ -654,7 +654,7 @@ describe('PhotoCardComponent current-photo marker', () => {
     // keydown handler, ahead of the change detection a conditional class would
     // be waiting on.
     const classes = host(createCard({ isActive: true, gridHasActiveCard: true })).classList;
-    expect(classes.contains('scroll-mb-20')).toBe(true);
+    expect(classes.contains('scroll-mb-28')).toBe(true);
     expect(classes.contains('scroll-mt-2')).toBe(true);
   });
 
