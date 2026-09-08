@@ -793,6 +793,68 @@ describe('GalleryComponent', () => {
       expect(data.trashAvailable).toBe(false);
       expect(data.allowTrash).toBe(false);
     });
+
+    // The guard reads `if (!viewScoped && !paths.length) return;` -- widened
+    // specifically so a whole-view cull (selectedPaths empty by design) is not
+    // silently dropped the way `if (!paths.length) return;` would drop it.
+    it('still opens under view scope even though selectedPaths is empty', async () => {
+      mockStore.config.set({ cull: { allow_trash: true, trash_available: true } });
+      mockStore.selectionScope.set('view');
+      mockStore.viewScopeSelected.set(true);
+      mockStore.excludedPaths.set(new Set(['/skip.jpg']));
+      mockStore.selectionCount.set(650);
+      const dialog = TestBed.inject(MatDialog);
+      (dialog.open as Mock).mockReturnValue({ afterClosed: () => of(null) });
+
+      await component.openCullDialog();
+
+      expect(dialog.open).toHaveBeenCalled();
+      const data = (dialog.open as Mock).mock.calls[0][1].data;
+      expect(data.filters).toEqual({ page: '1' });
+      expect(data.exclude).toEqual(['/skip.jpg']);
+      expect(data.count).toBe(650);
+    });
+  });
+
+  describe('openExportDialog', () => {
+    function select(paths: string[]) {
+      mockStore.selectedPaths.set(new Set(paths));
+      mockStore.selectionCount.set(paths.length);
+    }
+
+    it('opens the album-scoped dialog when the route carries an albumId, ignoring selection scope', () => {
+      routeMock.snapshot.paramMap.get = vi.fn(() => '42');
+      const dialog = TestBed.inject(MatDialog);
+
+      component.openExportDialog();
+
+      expect((dialog.open as Mock).mock.calls[0][1].data).toEqual({ albumId: 42 });
+    });
+
+    it('sends the filter payload, exclude list and count under view scope, with no paths key', () => {
+      mockStore.selectionScope.set('view');
+      mockStore.viewScopeSelected.set(true);
+      mockStore.excludedPaths.set(new Set(['/skip.jpg']));
+      mockStore.selectionCount.set(650);
+      const dialog = TestBed.inject(MatDialog);
+
+      component.openExportDialog();
+
+      const data = (dialog.open as Mock).mock.calls[0][1].data;
+      expect(data).toEqual({ filters: { page: '1' }, exclude: ['/skip.jpg'], count: 650 });
+      expect(data.paths).toBeUndefined();
+    });
+
+    it('sends the selected paths under path scope, with no filters key', () => {
+      select(['/a.jpg', '/b.jpg']);
+      const dialog = TestBed.inject(MatDialog);
+
+      component.openExportDialog();
+
+      const data = (dialog.open as Mock).mock.calls[0][1].data;
+      expect(data).toEqual({ paths: ['/a.jpg', '/b.jpg'] });
+      expect(data.filters).toBeUndefined();
+    });
   });
 
   describe('whole-view selection', () => {

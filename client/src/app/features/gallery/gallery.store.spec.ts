@@ -1280,6 +1280,26 @@ describe('GalleryStore selection', () => {
       expect(await store.pathsInView()).toBeNull();
       expect(apiGet).not.toHaveBeenCalled();
     });
+
+    it('countInView resolves null and notifies when the server request fails', async () => {
+      apiGet.mockReturnValue(throwError(() => new Error('Network error')));
+      const snackOpen = TestBed.inject(MatSnackBar).open as Mock;
+
+      expect(await store.countInView()).toBeNull();
+
+      expect(apiGet).toHaveBeenCalledWith('/photos/count', expect.any(Object));
+      expect(snackOpen).toHaveBeenCalledWith('errors.action_failed', '', expect.anything());
+    });
+
+    it('pathsInView resolves null and notifies when the server request fails', async () => {
+      apiGet.mockReturnValue(throwError(() => new Error('Network error')));
+      const snackOpen = TestBed.inject(MatSnackBar).open as Mock;
+
+      expect(await store.pathsInView()).toBeNull();
+
+      expect(apiGet).toHaveBeenCalledWith('/photos/paths', expect.any(Object));
+      expect(snackOpen).toHaveBeenCalledWith('errors.action_failed', '', expect.anything());
+    });
   });
 });
 

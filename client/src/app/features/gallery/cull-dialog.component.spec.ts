@@ -200,6 +200,60 @@ describe('CullDialogComponent', () => {
     });
   });
 
+  describe('view-scoped body() (filters/exclude/count)', () => {
+    function buildFiltered(
+      filters: Record<string, string>,
+      exclude: string[] = [],
+      count?: number,
+      paths: string[] = ['/a.jpg', '/b.jpg'],
+    ) {
+      post = vi.fn(() => of({ would_copy: [], skipped: [] }));
+      dialogClose = vi.fn();
+      TestBed.configureTestingModule({
+        providers: [
+          { provide: ApiService, useValue: { post } },
+          { provide: MatSnackBar, useValue: { open: vi.fn() } },
+          { provide: I18nService, useValue: { t: (k: string) => k } },
+          { provide: MatDialogRef, useValue: { close: dialogClose } },
+          { provide: MAT_DIALOG_DATA, useValue: { paths, filters, exclude, count } },
+        ],
+      });
+      component = TestBed.runInInjectionContext(() => new CullDialogComponent());
+    }
+
+    it('sends the filter and exclude list instead of a path list', async () => {
+      buildFiltered({ camera: 'Canon' }, ['/skip.jpg'], 650);
+      set('targetDir', '/dest');
+
+      await component.runPreview();
+
+      expect(post).toHaveBeenCalledWith('/cull/apply', expect.objectContaining({
+        paths: undefined,
+        filters: { camera: 'Canon' },
+        exclude: ['/skip.jpg'],
+      }));
+    });
+
+    it('carries the same filter/exclude shape into the destructive apply request', async () => {
+      buildFiltered({ camera: 'Canon' }, ['/skip.jpg'], 650);
+      set('targetDir', '/dest');
+
+      await component.apply();
+
+      expect(post).toHaveBeenCalledWith('/cull/apply', expect.objectContaining({
+        paths: undefined,
+        filters: { camera: 'Canon' },
+        exclude: ['/skip.jpg'],
+      }));
+    });
+
+    it('falls count back to paths.length when data.count is absent', () => {
+      buildFiltered({ camera: 'Canon' }, [], undefined, ['/a.jpg', '/b.jpg', '/c.jpg']);
+
+      expect((component as unknown as { count: number }).count).toBe(3);
+    });
+  });
+
   describe('preview rendering', () => {
     function buildRendered(paths = ['/a.jpg', '/b.jpg']) {
       post = vi.fn(() => of({ would_copy: paths, skipped: [] }));
