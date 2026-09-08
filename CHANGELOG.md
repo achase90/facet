@@ -4,6 +4,10 @@ All notable changes to Facet are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Simplified Chinese (`zh`) viewer language, bringing the UI to seven languages. The bundle covers every string in the English one, using photography and culling terminology throughout — bursts, exposure bracketing, focus peaking, shallow depth of field, keep/reject decisions and RAW/XMP sidecar files — and keeping the three cull outcomes distinct, since marking a photo rejected, moving it to a folder and sending it to the system trash are three different things Facet does not conflate. Nothing else had to change: `i18n.LANGUAGES` is the single source of truth the API and the switcher both derive from, so registering the code is the whole wiring. Browser locales resolve on their primary subtag, so `zh-CN` selects it automatically — as do `zh-TW` and `zh-HK`, which get Simplified for now. The documentation set is unchanged: `docs/` remains six languages, and this is a UI translation only. ([#129](https://github.com/ncoevoet/facet/pull/129))
+
 ### Fixed
 
 - **In French, a camera capsule was titled `{caméra}` instead of the camera's name.** `fix(i18n): restore French accents and non-breaking punctuation spaces` accent-restored the prose of `fr.json` and, with it, an interpolation token: `capsules.camera_title` became `{caméra}` and `capsules.camera_year_title` became `{caméra} — {year}`. The client substitutes by exact token name (`replaceAll('{camera}', …)`), so the accented form never matched and rendered literally — and because that string *is* the whole title for the camera capsule, a French user saw the brace expression itself where every other language showed "Canon EOS R5". Both tokens are back to `{camera}`; the visible French wording is unchanged, since neither string has any prose in it.
