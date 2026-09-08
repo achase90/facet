@@ -10,7 +10,9 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { firstValueFrom } from 'rxjs';
-import { AlbumExportMode, ExportService } from '../../core/services/export.service';
+import {
+  AlbumExportMode, AlbumExportResult, ExportService, SidecarExportResult,
+} from '../../core/services/export.service';
 import { I18nService } from '../../core/services/i18n.service';
 import { extractErrorDetail } from '../../core/utils/http-error.util';
 import { TranslatePipe } from '../../shared/pipes/translate.pipe';
@@ -19,6 +21,14 @@ import { I18N, I18N_KEYS } from '../../core/i18n/keys';
 export interface ExportEditorDialogData {
   /** Explicit selected photo paths (gallery selection). */
   paths?: string[];
+  /** The whole current gallery view, when the selection is view-scoped: the
+   *  server derives the rows from it, so no path list is sent and the
+   *  endpoint's 10,000-path cap does not apply. Mutually exclusive with `paths`. */
+  filters?: Record<string, string> | null;
+  /** Photos unticked out of a view-scoped selection. */
+  exclude?: string[];
+  /** How many photos a view-scoped selection stands for (display only). */
+  count?: number;
   /** Album id when exporting a whole album ("basket"). */
   albumId?: number;
 }
@@ -84,19 +94,38 @@ export class ExportEditorDialogComponent {
 
   readonly canRun = computed(() => {
     if (this.mode() === 'sidecars') {
-      return !!this.data.albumId || !!this.data.paths?.length;
+      return !!this.data.albumId || !!this.data.paths?.length || !!this.data.filters;
     }
     return !!this.targetDir().trim();
   });
+
+  /**
+   * The one request this dialog makes.
+   *
+   * A view-scoped selection takes its own service method rather than the
+   * path-list one, because the path list is exactly what that scope exists to
+   * avoid materialising.
+   */
+  private runRequest(): Promise<AlbumExportResult | SidecarExportResult> {
+    if (this.data.albumId) {
+      return firstValueFrom(
+        this.exportService.exportAlbum(this.data.albumId, this.mode(), this.targetDir().trim(), this.overwrite()),
+      );
+    }
+    if (this.data.filters) {
+      return firstValueFrom(this.exportService.exportSidecarsForView(
+        this.data.filters, this.data.exclude ?? [], this.overwrite(),
+      ));
+    }
+    return firstValueFrom(this.exportService.exportSidecars(this.data.paths ?? [], this.overwrite()));
+  }
 
   async run(): Promise<void> {
     if (!this.canRun() || this.running()) return;
     this.running.set(true);
     this.errorDetail.set(null);
     try {
-      const result = this.data.albumId
-        ? await firstValueFrom(this.exportService.exportAlbum(this.data.albumId, this.mode(), this.targetDir().trim(), this.overwrite()))
-        : await firstValueFrom(this.exportService.exportSidecars(this.data.paths ?? [], this.overwrite()));
+      const result = await this.runRequest();
       const count = ('copied' in result ? result.copied : result.written) ?? 0;
       this.snackBar.open(this.i18n.t(I18N.export.done, { count }), '', { duration: 2500 });
       this.dialogRef.close(result);

@@ -41,6 +41,22 @@ export class ExportService {
     return this.api.post('/export/sidecars', { paths, overwrite });
   }
 
+  /**
+   * Write XMP sidecars for a whole gallery view, resolved server-side.
+   *
+   * The counterpart to `exportSidecars` for a view-scoped selection: the server
+   * derives the rows from the filter set, so no path list crosses the wire and
+   * the endpoint's 10,000-path cap does not apply. `exclude` carries the photos
+   * the user unticked out of that view.
+   */
+  exportSidecarsForView(
+    filters: Record<string, string>,
+    exclude: string[] = [],
+    overwrite = false,
+  ): Observable<SidecarExportResult> {
+    return this.api.post('/export/sidecars', { filters, exclude, overwrite });
+  }
+
   /** "Basket" export: an album's selects as sidecars, or copied/symlinked out. */
   exportAlbum(albumId: number, mode: AlbumExportMode, targetDir = '', overwrite = false): Observable<AlbumExportResult> {
     return this.api.post(`/albums/${albumId}/export`, {
