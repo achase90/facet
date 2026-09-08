@@ -606,6 +606,11 @@ def _batch_scope_sql(conn, body, user):
     why the filter branch needs no :func:`_writable_photo_paths` pass: a row
     another tenant owns is not in the set at all, rather than filtered out of a
     list after the fact.
+
+    It also carries the album access check, so ``filters: {"album_id": N}``
+    naming an album this caller cannot open raises the same 403/404 the gallery
+    GET answers. That check used to live at the read call sites only, and this
+    write path reached straight past it.
     """
     from api.routers.gallery import gallery_scope_sql
 

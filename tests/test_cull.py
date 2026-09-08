@@ -389,6 +389,101 @@ class TestCullApplyFilterScope:
             })
         assert resp.status_code == 422
 
+    @staticmethod
+    def _album_db(tmp_path, member_paths, other_paths):
+        """Photos split between album 1 and no album at all."""
+        db = str(tmp_path / "album.db")
+        init_database(db)
+        conn = sqlite3.connect(db)
+        for path in member_paths + other_paths:
+            conn.execute(
+                "INSERT INTO photos (path, filename, is_rejected) VALUES (?, ?, 0)",
+                (path, os.path.basename(path)),
+            )
+        conn.execute("INSERT INTO albums (id, user_id, name) VALUES (1, NULL, 'trip')")
+        conn.executemany(
+            "INSERT INTO album_photos (album_id, photo_path) VALUES (1, ?)",
+            [(p,) for p in member_paths],
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_an_album_scoped_cull_is_narrowed_to_its_members(self, client, tmp_path):
+        """The album filter must scope the destructive path like it scopes the grid."""
+        inside = _make_file(tmp_path, "inside.jpg")
+        outside = _make_file(tmp_path, "outside.jpg")
+        db = self._album_db(tmp_path, [inside], [outside])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"album_id": "1"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["would_copy"] == [inside]
+
+    def test_an_unknown_album_is_404_like_the_gallery_get(self, client, tmp_path):
+        """The album access check guarded the READ paths only.
+
+        ``gallery_scope_sql`` was reached here directly, so a POST body naming
+        an album the caller cannot open resolved its rows anyway -- on the
+        endpoint that moves and trashes files. Same status as
+        ``GET /api/photos?album_id=99`` (tests/test_gallery.py), and no file
+        touched.
+        """
+        inside = _make_file(tmp_path, "inside.jpg")
+        db = self._album_db(tmp_path, [inside], [])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"album_id": "99"}, "action": "move_rejects",
+                "target_dir": str(tmp_path / "k"), "dry_run": False,
+            })
+        assert resp.status_code == 404, resp.text
+        assert os.path.isfile(inside)
+        assert not os.path.exists(str(tmp_path / "k"))
+
+
+class TestCullApplyTargetIsExactlyOne:
+    """``paths`` and ``filters`` name the same set two ways; never both.
+
+    Both-are-set used to resolve silently in ``paths``' favour --
+    ``_selected_paths`` returns before ``filters`` or ``exclude`` are read --
+    so a stale path list alongside a whole-view filter set dropped the scope
+    AND the exclusions on an endpoint that moves and trashes files. The twin of
+    ``TestBatchTargetIsExactlyOne`` in tests/test_batch_photo_writes.py.
+    """
+
+    def test_both_targets_is_422(self, client, tmp_path):
+        named = _make_file(tmp_path, "named.jpg")
+        filtered = _make_file(tmp_path, "filtered.jpg")
+        db = _db(tmp_path, [(named, 1), (filtered, 1)])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "paths": [named], "filters": {"category": "aerial"},
+                "exclude": [filtered],
+                "action": "move_rejects", "target_dir": str(tmp_path / "k"),
+                "dry_run": False,
+            })
+        assert resp.status_code == 422, resp.text
+        assert os.path.isfile(named)
+        assert os.path.isfile(filtered)
+
+    def test_neither_target_is_still_400(self, client, tmp_path):
+        """The pre-existing status for a request with no target at all."""
+        db = _db(tmp_path, [])
+        with mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)):
+            resp = client.post("/api/cull/apply", json={"action": "copy_keeps"})
+        assert resp.status_code == 400, resp.text
+
 
 class TestCullApplySequences:
     def test_copy_keeps_bracket_siblings_reported_and_included_when_flag_on(self, client, tmp_path):

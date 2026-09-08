@@ -360,3 +360,77 @@ class TestBatchTargetIsExactlyOne:
         resp = single_user_client.post(endpoint, json={"photo_paths": [], **extra})
         assert resp.status_code == 200, resp.text
         assert resp.json()["count"] == 0, resp.json()
+
+
+ALICE_ALBUM = 88801
+BOB_ALBUM = 88802
+UNKNOWN_ALBUM = 88899
+
+
+@pytest.fixture()
+def albums(seeded):
+    """One unowned album holding ALICE_ONE, and one album owned by bob.
+
+    Written into the shared session database the batch endpoints read, and
+    removed again by id -- the same "clean up by what you wrote" contract
+    ``seed_photos_prefix`` follows for photo rows.
+    """
+    with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+        conn.execute("INSERT INTO albums (id, user_id, name) VALUES (?, NULL, 'alice trip')",
+                     (ALICE_ALBUM,))
+        conn.execute("INSERT INTO albums (id, user_id, name) VALUES (?, 'bob', 'bob trip')",
+                     (BOB_ALBUM,))
+        conn.execute("INSERT INTO album_photos (album_id, photo_path) VALUES (?, ?)",
+                     (ALICE_ALBUM, ALICE_ONE))
+        conn.execute("INSERT INTO album_photos (album_id, photo_path) VALUES (?, ?)",
+                     (BOB_ALBUM, BOB_PHOTO))
+    yield
+    with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+        conn.execute("DELETE FROM album_photos WHERE album_id IN (?, ?)",
+                     (ALICE_ALBUM, BOB_ALBUM))
+        conn.execute("DELETE FROM albums WHERE id IN (?, ?)", (ALICE_ALBUM, BOB_ALBUM))
+
+
+@pytest.mark.parametrize(("endpoint", "extra"), ENDPOINTS, ids=ENDPOINT_IDS)
+class TestFilterScopedAlbumAccess:
+    """A filter set naming an album answers like the gallery GET does.
+
+    ``_batch_scope_sql`` called ``gallery_scope_sql`` directly, past the album
+    access check the read endpoints applied to the same filter set, so a POST
+    body carrying ``filters: {"album_id": N}`` wrote through an album whose GET
+    answers 404/403.
+    """
+
+    def test_an_album_scoped_write_is_narrowed_to_its_members(
+        self, single_user_client, albums, endpoint, extra
+    ):
+        resp = single_user_client.post(
+            endpoint, json={"filters": {"album_id": str(ALICE_ALBUM)}, **extra}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["count"] == 1, resp.json()
+        assert _touched(_photo_flags(SEEDED)) == {ALICE_ONE}
+
+    def test_an_unknown_album_is_404_like_the_gallery_get(
+        self, single_user_client, albums, endpoint, extra
+    ):
+        resp = single_user_client.post(
+            endpoint, json={"filters": {"album_id": str(UNKNOWN_ALBUM)}, **extra}
+        )
+        assert resp.status_code == 404, resp.text
+        assert _touched(_photo_flags(SEEDED)) == set()
+
+    def test_another_users_album_is_403_like_the_gallery_get(
+        self, alice_client, albums, endpoint, extra
+    ):
+        """Multi-user is genuinely on here, so ownership is what denies access.
+
+        The visibility clause alone would have made this a silent no-op; the
+        403 is what makes it the same answer the grid gives.
+        """
+        resp = alice_client.post(
+            endpoint, json={"filters": {"album_id": str(BOB_ALBUM)}, **extra}
+        )
+        assert resp.status_code == 403, resp.text
+        assert _written_prefs(SEEDED) == set()
+        assert _touched(_photo_flags(SEEDED)) == set()

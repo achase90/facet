@@ -1334,3 +1334,67 @@ class TestSeededPhotosFixture:
         for expected in seeded_photos:
             assert photos_by_path[expected["path"]]["aggregate"] == expected["aggregate"]
             assert photos_by_path[expected["path"]]["category"] == expected["category"]
+
+
+class TestGalleryListingAlbumScope(_WholeViewEndpoint):
+    """GET /api/photos must answer for an album exactly like the whole-view pair.
+
+    The listing carried its own copy of the album access check, line for line
+    the one the count/paths endpoints used. Both now go through
+    ``gallery_scope_sql_async``, so this pins the listing's own status: an
+    unknown album is a 404 here too, not a silently empty grid.
+    """
+
+    endpoint = "/api/photos"
+
+    def test_album_scope_is_honoured(self, tmp_path):
+        data = self._get(self._album_db(tmp_path), "album_id=1&per_page=200").json()
+        assert {p["path"] for p in data["photos"]} == {"/p0.jpg", "/p4.jpg", "/p9.jpg"}
+        assert data["total"] == 3
+
+    def test_an_unknown_album_is_404(self, tmp_path):
+        assert self._get(self._album_db(tmp_path), "album_id=99").status_code == 404
+
+
+class TestGalleryParamsArePreparedOnce:
+    """One request normalizes its filter set once.
+
+    ``_prepare_gallery_params`` merges the viewer defaults, expands the
+    ``TYPE_FILTERS`` presets and runs the whole ``GalleryParams`` validation.
+    The endpoints that need the prepared params for their own sort or paging
+    used to compute them and then hand the RAW query string to the scope
+    builder, which prepared the identical dict a second time. Cheap per call,
+    but it is on every gallery request.
+    """
+
+    def _count_preparations(self, db_path, url):
+        from api.routers import gallery as gallery_module
+
+        real = gallery_module._prepare_gallery_params
+        with (
+            mock.patch("api.routers.gallery.get_db", _conn_factory(db_path)),
+            mock.patch("api.routers.gallery.get_async_db", _async_conn_factory(db_path)),
+            mock.patch("api.routers.gallery.VIEWER_CONFIG", _VIEWER_CONFIG),
+            mock.patch("api.db_helpers._existing_columns_cache", _existing_columns(db_path)),
+            mock.patch.dict("api.config._count_cache", {}, clear=True),
+            mock.patch("api.routers.gallery._prepare_gallery_params",
+                       side_effect=real) as spy,
+        ):
+            resp = TestClient(_create_app_no_auth()).get(url)
+        assert resp.status_code == 200, resp.text
+        return spy.call_count
+
+    def test_the_listing_prepares_once(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [_photo("/a.jpg", "2024:01:01 10:00:00")])
+        assert self._count_preparations(db_path, "/api/photos?type=aerial") == 1
+
+    def test_the_percentile_selection_prepares_once(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        _make_db(db_path, [
+            _photo(f"/p{i}.jpg", "2024:01:01 10:00:00", aggregate=float(i))
+            for i in range(10)
+        ])
+        assert self._count_preparations(
+            db_path, "/api/photos/select_bottom_percent?keep_percent=50"
+        ) == 1

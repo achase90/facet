@@ -22,7 +22,7 @@ import shutil
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from api.auth import CurrentUser, require_edition
 from api.config import VIEWER_CONFIG, cull_allow_trash, get_all_scan_directories
@@ -52,6 +52,17 @@ router = APIRouter(tags=["export"])
 # (999). Matches the chunked-fetch size used in gallery.py.
 _PATH_QUERY_CHUNK = 500
 
+# Cap on the photos one sidecar export may touch when the set comes from a
+# filter instead of an explicit list. Matches ExportSidecarsRequest.paths'
+# own max_length so both request forms are bounded identically -- the filter
+# branch is the UI-reachable one now that the gallery can select a whole view
+# without sending its paths. The work per photo is two exiftool processes
+# (~0.13s measured), and the endpoint is a sync `def`, so it pins one FastAPI
+# threadpool worker for the whole run: an uncapped library-wide export would
+# hold that worker for hours. Refused rather than truncated -- half-exporting a
+# selection the user believed was whole is worse than a clear refusal.
+_SIDECAR_FILTER_MAX = 10000
+
 
 # --- Request models ---
 
@@ -64,14 +75,44 @@ class EmbedMetadataRequest(BaseModel):
     path: str
 
 
-class ExportSidecarsRequest(BaseModel):
+# The set a filter-scoped destructive request acts on: named paths, or the
+# gallery view itself. Shared by sidecar export and cull so the two cannot
+# disagree about how a selection is named -- and so the both-are-set rejection
+# below is written once rather than per endpoint. No docstring: these fields
+# are inlined into each endpoint's generated OpenAPI model, which carried no
+# description before this base existed.
+class _PathsOrFiltersRequest(BaseModel):
     paths: Optional[list[str]] = Field(default=None, max_length=10000)
     filters: Optional[dict] = None
     # Paths to drop from the filter set. The client's "whole view selected,
     # minus these few" state, sent as the exceptions rather than as the whole
     # selection. Capped well below SQLITE_MAX_VARIABLE_NUMBER because it binds
-    # one placeholder each into a single NOT IN (...).
+    # one placeholder each into a single NOT IN (...). Only ever narrows the
+    # filter set, so it can never widen a destructive action.
     exclude: Optional[list[str]] = Field(default=None, max_length=1000)
+
+    @model_validator(mode='after')
+    def _reject_both_targets(self):
+        """``paths`` and ``filters`` name the same set two ways; never both.
+
+        Sending both was silently resolved in ``paths``' favour:
+        :func:`_selected_paths` returns the path list before ``filters`` or
+        ``exclude`` are ever read, so a client that sent a whole-view filter
+        set alongside a stale path list had its scope AND its exclusions
+        dropped without a word -- on endpoints that move and trash files. 422
+        like ``BatchPhotoRequest._exactly_one_target``, its twin in
+        ``api/routers/faces.py``.
+
+        The "neither" case stays a 400 in the handlers rather than joining this
+        validator: that is the status this pair of endpoints has always
+        returned for a request with no target at all.
+        """
+        if self.paths is not None and self.filters is not None:
+            raise ValueError("paths and filters are mutually exclusive — send one, not both")
+        return self
+
+
+class ExportSidecarsRequest(_PathsOrFiltersRequest):
     overwrite: bool = False
 
 
@@ -81,12 +122,7 @@ class AlbumExportRequest(BaseModel):
     overwrite: bool = False
 
 
-class CullApplyRequest(BaseModel):
-    paths: Optional[list[str]] = Field(default=None, max_length=10000)
-    filters: Optional[dict] = None
-    # See ExportSidecarsRequest.exclude. Only ever narrows the filter set, so it
-    # can never widen a destructive action.
-    exclude: Optional[list[str]] = Field(default=None, max_length=1000)
+class CullApplyRequest(_PathsOrFiltersRequest):
     action: Literal["copy_keeps", "trash_rejects", "move_rejects"]
     target_dir: Optional[str] = None
     # Off by default: rejecting a derived JPEG must not silently trash/move its
@@ -133,36 +169,60 @@ def _fetch_rating_rows(conn, paths, user_id):
     return {row["path"]: dict(row) for row in rows}
 
 
-def _resolve_filter_paths(conn, filters, user_id, exclude=None):
+def _resolve_filter_paths(conn, filters, user_id, exclude=None, max_paths=None):
     """Resolve a gallery filter set to a list of photo paths.
 
     ``gallery_scope_sql`` is the gallery's own definition of "the current
     view", normalization included, so a filter set that renders one grid
-    resolves here to exactly the rows that grid shows — ``exclude`` aside.
+    resolves here to exactly the rows that grid shows — ``exclude`` aside. It
+    also applies the album access check, so a filter set naming an album this
+    caller cannot open raises 403/404 here exactly as the gallery GET does.
     Parameterized: only the fixed from-clause and the generated placeholder run
     are interpolated, every user value stays a ``?`` bind.
+
+    ``max_paths`` bounds the resolved set. The count is a ``COUNT(*)`` over the
+    same scope, taken BEFORE the path list is materialised, so an oversized
+    view is refused without ever building the list it would have exported.
     """
     from api.routers.gallery import gallery_scope_sql
 
     from_clause, where_str, params = gallery_scope_sql(conn, filters, user_id, exclude)
+    if max_paths is not None:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM {from_clause}{where_str}", params
+        ).fetchone()[0]
+        if total > max_paths:
+            raise HTTPException(
+                status_code=412,
+                detail=(
+                    f"This view holds {total} photos and sidecar export is capped at "
+                    f"{max_paths}. Narrow the filters and export again."
+                ),
+            )
     rows = conn.execute(
         f"SELECT photos.path FROM {from_clause}{where_str}", params
     ).fetchall()
     return [row["path"] for row in rows]
 
 
-def _selected_paths(conn, body, user_id):
+def _selected_paths(conn, body, user_id, max_filter_paths=None):
     """The paths a ``paths``-or-``filters`` request acts on.
 
     Explicit paths win; otherwise the filter set is resolved through the
     gallery's own scope builder, which rejects a malformed filter set by
     raising — a 422 here, rather than the 500 an escaping ``ValidationError``
-    would turn into.
+    would turn into. The two are mutually exclusive at validation
+    (``_PathsOrFiltersRequest``), so "paths win" is now only the empty-list
+    case rather than a silent preference.
+
+    ``max_filter_paths`` bounds the FILTER branch only; the ``paths`` branch is
+    already bounded by the field's own ``max_length``.
     """
     if body.paths:
         return body.paths
     try:
-        return _resolve_filter_paths(conn, body.filters, user_id, body.exclude)
+        return _resolve_filter_paths(conn, body.filters, user_id, body.exclude,
+                                     max_paths=max_filter_paths)
     except ValidationError as e:
         logger.warning("Export filter validation failed: %s", e.errors())
         raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
@@ -684,12 +744,17 @@ def api_export_sidecars(
     user: CurrentUser = Depends(require_edition),
 ):
     """Write XMP sidecars for many photos (explicit paths or a filter set)."""
+    # Kept a one-liner: FastAPI publishes this docstring as the operation
+    # description, and the generated client types (client/src/app/core/api/
+    # schema.d.ts) are diffed in CI, so prose here is a cross-project change.
+    # Both ways of naming the set are bounded at _SIDECAR_FILTER_MAX; a larger
+    # filter set is refused with 412 rather than truncated.
     if not body.paths and body.filters is None:
         raise HTTPException(status_code=400, detail="Either paths or filters is required")
 
     user_id = user.user_id
     with get_db() as conn:
-        paths = _selected_paths(conn, body, user_id)
+        paths = _selected_paths(conn, body, user_id, max_filter_paths=_SIDECAR_FILTER_MAX)
         return _write_sidecars_for_paths(conn, paths, user_id, body.overwrite)
 
 

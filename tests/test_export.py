@@ -16,6 +16,8 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
+from db.schema import init_database
+
 _EXPORT_MODULE = "api.routers.export"
 
 _NS = {
@@ -221,6 +223,158 @@ class TestExportSidecars:
     def test_regular_client_forbidden(self, regular_client):
         resp = regular_client.post("/api/export/sidecars", json={"paths": ["/x.jpg"]})
         assert resp.status_code == 403
+
+
+def _full_schema_db(db_path, rows):
+    """A photos DB with the REAL schema, for the tests that run the true
+    ``gallery_scope_sql`` filter branch rather than mocking it out.
+
+    ``_seed_db`` above hand-rolls a handful of columns, which is enough for the
+    path-list tests but makes ``_build_gallery_where`` raise the moment a query
+    touches a column it left out. ``db.schema.init_database`` is the only
+    definition that cannot drift from the one the endpoint queries.
+    """
+    init_database(db_path)
+    conn = sqlite3.connect(db_path)
+    for row in rows:
+        cols = list(row.keys())
+        conn.execute(
+            f"INSERT INTO photos ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' for _ in cols)})",
+            [row[c] for c in cols],
+        )
+    conn.commit()
+    conn.close()
+
+
+class TestExportSidecarsFilterScopeIsBounded:
+    """The ``filters`` branch must be bounded like the ``paths`` branch.
+
+    ``paths`` carries ``max_length=10000``; the filter branch had no bound at
+    all, and the gallery can now select a whole view without sending its paths.
+    Each photo spawns two exiftool processes and the endpoint is a sync ``def``
+    holding a threadpool worker for the whole run, so an uncapped library-wide
+    export pins that worker for hours.
+    """
+
+    def test_the_cap_matches_the_explicit_path_limit(self):
+        """Both request forms bound the same work, so both bound it the same."""
+        from api.routers.export import ExportSidecarsRequest, _SIDECAR_FILTER_MAX
+
+        paths_max = ExportSidecarsRequest.model_fields["paths"].metadata[0].max_length
+        assert _SIDECAR_FILTER_MAX == paths_max == 10000
+
+    def _db_of(self, tmp_path, count):
+        rows = []
+        for i in range(count):
+            img = tmp_path / f"cap{i}.jpg"
+            img.write_bytes(b"JPEGDATA")
+            rows.append({"path": str(img), "filename": img.name, "category": "capped"})
+        db = str(tmp_path / "cap.db")
+        _full_schema_db(db, rows)
+        return db, [r["path"] for r in rows]
+
+    def test_a_view_over_the_cap_is_refused(self, client, tmp_path):
+        db, paths = self._db_of(tmp_path, 3)
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._SIDECAR_FILTER_MAX", 2),
+        ):
+            resp = client.post("/api/export/sidecars",
+                               json={"filters": {"category": "capped"}})
+        assert resp.status_code == 412, resp.text
+        detail = resp.json()["detail"]
+        # Names the count AND the limit: "too many" alone leaves the user with
+        # no idea how far to narrow.
+        assert "3" in detail and "2" in detail
+        # Refused, never half-written: a partial export of a selection the user
+        # believed was whole is worse than a clear refusal.
+        assert [p for p in paths if os.path.exists(p + ".xmp")] == []
+
+    def test_a_view_at_the_cap_still_exports(self, client, tmp_path):
+        db, paths = self._db_of(tmp_path, 2)
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._SIDECAR_FILTER_MAX", 2),
+        ):
+            resp = client.post("/api/export/sidecars",
+                               json={"filters": {"category": "capped"}})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["written"] == 2
+        assert all(os.path.isfile(p + ".xmp") for p in paths)
+
+
+class TestExportSidecarsAlbumScope:
+    """A filter set naming an album answers like the gallery GET does.
+
+    ``_resolve_filter_paths`` called ``gallery_scope_sql`` directly, past the
+    album access check the read paths applied, so a POST body carrying
+    ``filters: {"album_id": N}`` exported ratings out of an album whose GET
+    answers 404/403.
+    """
+
+    def _album_db(self, tmp_path, member_names, other_names):
+        rows = []
+        for name in member_names + other_names:
+            img = tmp_path / name
+            img.write_bytes(b"JPEGDATA")
+            rows.append({"path": str(img), "filename": name, "star_rating": 3})
+        db = str(tmp_path / "album.db")
+        _full_schema_db(db, rows)
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO albums (id, user_id, name) VALUES (1, NULL, 'trip')")
+        conn.executemany(
+            "INSERT INTO album_photos (album_id, photo_path) VALUES (1, ?)",
+            [(str(tmp_path / n),) for n in member_names],
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_an_album_scoped_export_is_narrowed_to_its_members(self, client, tmp_path):
+        db = self._album_db(tmp_path, ["in.jpg"], ["out.jpg"])
+        with mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)):
+            resp = client.post("/api/export/sidecars", json={"filters": {"album_id": "1"}})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["written"] == 1
+        assert os.path.isfile(str(tmp_path / "in.jpg") + ".xmp")
+        assert not os.path.exists(str(tmp_path / "out.jpg") + ".xmp")
+
+    def test_an_unknown_album_is_404_like_the_gallery_get(self, client, tmp_path):
+        db = self._album_db(tmp_path, ["in.jpg"], ["out.jpg"])
+        with mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)):
+            resp = client.post("/api/export/sidecars", json={"filters": {"album_id": "99"}})
+        assert resp.status_code == 404, resp.text
+        assert not os.path.exists(str(tmp_path / "in.jpg") + ".xmp")
+        assert not os.path.exists(str(tmp_path / "out.jpg") + ".xmp")
+
+
+class TestExportSidecarsTargetIsExactlyOne:
+    """``paths`` and ``filters`` name the same set two ways; never both.
+
+    Sending both silently won for ``paths``: ``_selected_paths`` returns the
+    path list before ``filters`` or ``exclude`` are read, so the whole-view
+    scope and its exclusions were dropped without a word.
+    """
+
+    def test_both_targets_is_422(self, client, tmp_path):
+        p1, r1 = _make_photo(tmp_path, "a.jpg", star_rating=4)
+        db = str(tmp_path / "t.db")
+        _seed_db(db, [r1])
+        with mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)):
+            resp = client.post("/api/export/sidecars", json={
+                "paths": [p1], "filters": {"category": "portrait"}, "exclude": [p1],
+            })
+        assert resp.status_code == 422, resp.text
+        assert not os.path.exists(p1 + ".xmp")
+
+    def test_neither_target_is_still_400(self, client, tmp_path):
+        """The pre-existing status for a request with no target at all."""
+        db = str(tmp_path / "t.db")
+        _seed_db(db, [])
+        with mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)):
+            resp = client.post("/api/export/sidecars", json={})
+        assert resp.status_code == 400, resp.text
 
 
 # ---------------------------------------------------------------------------

@@ -557,7 +557,44 @@ def _build_gallery_where(params, conn=None, user_id=None):
     return where_clauses, sql_params
 
 
-def gallery_scope_sql(conn, filters, user_id, exclude=None):
+def _scoped_album_id(filters):
+    """The album id a filter set scopes to, or ``None`` if it scopes to none.
+
+    Read off the RAW filter dict rather than the prepared params so the access
+    check runs before :func:`_prepare_gallery_params` can reject the set for an
+    unrelated reason — an unknown album must answer 404 whatever else the query
+    string carries. The two are the same value in practice: ``album_id`` is a
+    plain ``str`` field on ``GalleryParams`` and ``normalize_params`` does not
+    touch it, so preparation passes it through unchanged.
+    """
+    _, album_params = album_filter_clause((filters or {}).get('album_id'))
+    return album_params[0] if album_params else None
+
+
+def _gallery_scope_sql_checked(conn, filters, user_id, exclude, prepared):
+    """The scope tuple, with the album access check ALREADY performed.
+
+    Private on purpose: the two public entry points below each run the access
+    check for their own connection flavour, so no caller outside this module
+    can reach the builder without it. ``prepared`` is the params dict
+    :func:`_prepare_gallery_params` returns, passed in by a caller that has
+    already prepared the same input (the listing and percentile endpoints need
+    it for their sort and paging), so one request prepares once.
+    """
+    if prepared is None:
+        _, prepared = _prepare_gallery_params(dict(filters or {}))
+    from_clause, from_params = get_photos_from_clause(user_id)
+    where_clauses, sql_params = _build_gallery_where(prepared, conn, user_id=user_id)
+    all_params = list(from_params) + list(sql_params)
+    if exclude:
+        placeholders = ','.join('?' * len(exclude))
+        where_clauses.append(f"photos.path NOT IN ({placeholders})")
+        all_params.extend(exclude)
+    where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    return from_clause, where_str, all_params
+
+
+def gallery_scope_sql(conn, filters, user_id, exclude=None, prepared=None):
     """``(from_clause, where_str, params)`` for the rows one gallery view shows.
 
     The single definition of "the current view" for every surface that acts on
@@ -568,6 +605,13 @@ def gallery_scope_sql(conn, filters, user_id, exclude=None):
     presets, so a filter set that renders one gallery cannot resolve to a
     different row set for a mutation. Skipping that step is what the cull and
     export paths used to do.
+
+    An album-scoped filter set is access-checked HERE rather than at each call
+    site, because three of them are POST bodies: a request carrying
+    ``filters: {"album_id": N}`` reached an album whose GET answers 403/404 on
+    the filter-scoped cull, sidecar export and batch writes, all of which
+    skipped the check the read paths performed. Building the scope and
+    authorizing it are now one step, so a fourth caller cannot omit it.
 
     ``exclude`` removes named paths from the scope, which is how the client's
     "whole view selected, minus these few" state reaches the server without
@@ -583,17 +627,31 @@ def gallery_scope_sql(conn, filters, user_id, exclude=None):
     and the generated placeholder run are interpolated. Raises
     ``ValidationError`` for a malformed filter set, which callers translate to
     422.
+
+    ``conn`` must be a synchronous ``sqlite3`` connection. Use
+    :func:`gallery_scope_sql_async` on an aiosqlite one.
     """
-    _, params = _prepare_gallery_params(dict(filters or {}))
-    from_clause, from_params = get_photos_from_clause(user_id)
-    where_clauses, sql_params = _build_gallery_where(params, conn, user_id=user_id)
-    all_params = list(from_params) + list(sql_params)
-    if exclude:
-        placeholders = ','.join('?' * len(exclude))
-        where_clauses.append(f"photos.path NOT IN ({placeholders})")
-        all_params.extend(exclude)
-    where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-    return from_clause, where_str, all_params
+    album_id = _scoped_album_id(filters)
+    if album_id is not None:
+        from api.routers.albums import _check_album_access
+        _check_album_access(conn, album_id, user_id)
+    return _gallery_scope_sql_checked(conn, filters, user_id, exclude, prepared)
+
+
+async def gallery_scope_sql_async(conn, filters, user_id, exclude=None, prepared=None):
+    """:func:`gallery_scope_sql` for an aiosqlite connection.
+
+    Two entry points rather than one, because the album access check is the
+    only part of the scope that queries the database and aiosqlite's
+    ``execute`` returns an awaitable ``Result`` with no ``fetchone`` — the sync
+    check cannot run on this connection at all. Everything after the check is
+    the shared, connection-agnostic builder, so the two cannot drift.
+    """
+    album_id = _scoped_album_id(filters)
+    if album_id is not None:
+        from api.routers.albums import _check_album_access_async
+        await _check_album_access_async(conn, album_id, user_id)
+    return _gallery_scope_sql_checked(conn, filters, user_id, exclude, prepared)
 
 
 @router.get("/api/photo", response_model=Photo, response_model_exclude_unset=True)
@@ -806,20 +864,6 @@ def _resolve_order_by(params: dict) -> str:
 _SELECT_BOTTOM_MAX = 5000
 
 
-async def _scope_for_request(conn, qp, user_id, exclude=None):
-    """The gallery scope for a request, with the album access check applied.
-
-    An album-scoped view must answer 403/404 the same way the listing endpoint
-    does, or "select the whole view" would count rows through an album the
-    caller cannot open.
-    """
-    _, album_params = album_filter_clause(qp.get('album_id'))
-    if album_params:
-        from api.routers.albums import _check_album_access_async
-        await _check_album_access_async(conn, album_params[0], user_id)
-    return gallery_scope_sql(conn, qp, user_id, exclude)
-
-
 @router.get("/api/photos/select_bottom_percent")
 async def api_select_bottom_percent(
     request: Request,
@@ -852,7 +896,9 @@ async def api_select_bottom_percent(
     try:
         async with get_async_db() as conn:
             user_id = user.user_id if user else None
-            from_clause, where_str, all_params = await _scope_for_request(conn, qp, user_id)
+            from_clause, where_str, all_params = await gallery_scope_sql_async(
+                conn, qp, user_id, prepared=params
+            )
 
             total = await get_cached_count_async(
                 conn, where_str, all_params, from_clause=from_clause
@@ -911,7 +957,7 @@ async def api_photos_count(
     try:
         async with get_async_db() as conn:
             user_id = user.user_id if user else None
-            from_clause, where_str, all_params = await _scope_for_request(conn, qp, user_id)
+            from_clause, where_str, all_params = await gallery_scope_sql_async(conn, qp, user_id)
             total = await get_cached_count_async(
                 conn, where_str, all_params, from_clause=from_clause
             )
@@ -942,7 +988,7 @@ async def api_photos_paths(
     try:
         async with get_async_db() as conn:
             user_id = user.user_id if user else None
-            from_clause, where_str, all_params = await _scope_for_request(conn, qp, user_id)
+            from_clause, where_str, all_params = await gallery_scope_sql_async(conn, qp, user_id)
             cur = await conn.execute(
                 f"SELECT photos.path FROM {from_clause}{where_str}", all_params
             )
@@ -992,14 +1038,13 @@ async def api_photos(
     try:
         async with get_async_db() as conn:
             user_id = user.user_id if user else None
-            _, album_params = album_filter_clause(params.get('album_id'))
-            if album_params:
-                from api.routers.albums import _check_album_access_async
-                await _check_album_access_async(conn, album_params[0], user_id)
-            from_clause, from_params = get_photos_from_clause(user_id)
-            where_clauses, sql_params = _build_gallery_where(params, conn, user_id=user_id)
-            all_params = from_params + sql_params
-            where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            # The listing's own scope, from the same builder every whole-view
+            # surface uses -- album access check included. `params` is already
+            # prepared above for the sort and paging, so it is handed over
+            # rather than prepared again.
+            from_clause, where_str, all_params = await gallery_scope_sql_async(
+                conn, qp, user_id, prepared=params
+            )
 
             total_count = await get_cached_count_async(conn, where_str, all_params, from_clause=from_clause)
             total_pages, offset = paginate(total_count, page, per_page)
@@ -1010,6 +1055,7 @@ async def api_photos(
                           'hide_panoramas', 'no_blink', 'burst_only')
             )
             if any_hide_active:
+                _, from_params = get_photos_from_clause(user_id)
                 params_no_hide = dict(params)
                 for k in ('hide_blinks', 'hide_bursts', 'hide_duplicates', 'hide_brackets',
                           'hide_panoramas', 'no_blink', 'burst_only'):
