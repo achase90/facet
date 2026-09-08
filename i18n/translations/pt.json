@@ -1078,7 +1078,18 @@
       "mark_panorama": "Marcar como um panorama",
       "mark_hdr_panorama": "Marcar como um panorama HDR",
       "marked_panorama": "{count} fotos marcadas como um panorama",
-      "mark_needs_two": "Selecione pelo menos duas fotos"
+      "mark_needs_two": "Selecione pelo menos duas fotos",
+      "mark_needs_paths": "Selecione as fotos em si — uma seleção de toda a visualização não pode ser uma série",
+      "mark_too_many": "Uma série contém no máximo {max} fotos, e {count} estão selecionadas",
+      "view_scope_active": "Visualização inteira selecionada — {count} fotos",
+      "view_scope_offer": "Todas as {count} fotos carregadas até agora estão selecionadas.",
+      "view_scope_select_all": "Selecionar todas as {total} fotos desta visualização",
+      "view_scope_confirm_title": "Aplicar a toda a visualização?",
+      "view_scope_confirm_message": "Isso vai alterar {count} fotos que correspondem aos filtros atuais, incluindo as que não estão carregadas na tela. Continuar?",
+      "view_scope_mismatch": "{count} fotos alteradas, não as {announced} anunciadas — a visualização mudou enquanto a ação era executada",
+      "view_scope_empty": "Nada mais corresponde aos filtros atuais",
+      "download_confirm_title": "Baixar {count} fotos?",
+      "download_confirm_message": "Cada foto é baixada como um arquivo separado. {count} delas vão demorar um pouco e podem sobrecarregar o navegador."
     },
     "keep_top": {
       "label": "Manter top %",

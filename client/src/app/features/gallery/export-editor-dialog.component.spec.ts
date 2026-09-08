@@ -9,14 +9,18 @@ import { ExportEditorDialogComponent, ExportEditorDialogData } from './export-ed
 describe('ExportEditorDialogComponent', () => {
   let component: ExportEditorDialogComponent;
   let exportAlbum: ReturnType<typeof vi.fn>;
+  let exportSidecars: ReturnType<typeof vi.fn>;
+  let exportSidecarsForView: ReturnType<typeof vi.fn>;
   let dialogClose: ReturnType<typeof vi.fn>;
 
   function build(data: ExportEditorDialogData = { albumId: 7 }) {
     exportAlbum = vi.fn(() => of({ ok: true, mode: 'copy', copied: 1, skipped: 0, errors: 0 }));
+    exportSidecars = vi.fn(() => of({ ok: true, written: 0, skipped: 0, errors: 0, sidecars: [] }));
+    exportSidecarsForView = vi.fn(() => of({ ok: true, written: 5, skipped: 0, errors: 0, sidecars: [] }));
     dialogClose = vi.fn();
     TestBed.configureTestingModule({
       providers: [
-        { provide: ExportService, useValue: { exportAlbum, exportSidecars: vi.fn(() => of({})) } },
+        { provide: ExportService, useValue: { exportAlbum, exportSidecars, exportSidecarsForView } },
         { provide: MatSnackBar, useValue: { open: vi.fn() } },
         { provide: I18nService, useValue: { t: (k: string) => k } },
         { provide: MatDialogRef, useValue: { close: dialogClose } },
@@ -56,6 +60,20 @@ describe('ExportEditorDialogComponent', () => {
     exportAlbum.mockReturnValueOnce(throwError(() => new Error('boom')));
     await component.run();
     expect(component.errorDetail()).toBeNull();
+  });
+
+  it('sends a view-scoped selection as filters, never as a path list', async () => {
+    build({ filters: { type: 'aerial', hide_bursts: '1' }, exclude: ['a.jpg'], count: 129 });
+    component.overwrite.set(true);
+    await component.run();
+    expect(exportSidecarsForView).toHaveBeenCalledWith({ type: 'aerial', hide_bursts: '1' }, ['a.jpg'], true);
+    expect(exportSidecars).not.toHaveBeenCalled();
+    expect(dialogClose).toHaveBeenCalled();
+  });
+
+  it('enables the sidecar run for a filters-only selection', () => {
+    build({ filters: { type: 'aerial' } });
+    expect(component.canRun()).toBe(true);
   });
 
   it('does not crash on a non-string detail (FastAPI validation error list)', async () => {
