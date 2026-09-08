@@ -283,6 +283,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
               [attr.aria-rowcount]="rowsModel().length"
               class="flex flex-col p-2 md:p-4 outline-none"
               (keydown)="onGridKeydown($event)"
+              (focusout)="onGridFocusOut($event)"
             >
               <div [style.height.px]="topSpacer()" aria-hidden="true"></div>
               @for (row of visibleRows(); track row.photos[0].path) {
@@ -300,13 +301,15 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [mosaicMode]="effectiveGalleryMode() === 'mosaic'"
                       [config]="store.config()"
                       [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
+                      [isActive]="row.startIndex + i === activeIndex()"
+                      [gridHasActiveCard]="hasActivePhoto()"
                       [currentSort]="store.filters().sort"
                       [thumbSize]="thumbSize()"
                       [isEditionMode]="auth.isEdition()"
                       [personFilterId]="store.filters().person_id"
                       [tooltipMode]="tooltipMode()"
                       [panelActivation]="panelActivation()"
-                      (selectionChange)="toggleSelection($event.photo, $event.event)"
+                      (selectionChange)="toggleSelection($event.photo, $event.event, row.startIndex + i)"
                       (tooltipShow)="showTooltip($event.event, $event.photo)"
                       (tooltipHide)="hideTooltip()"
                       (tagClicked)="store.updateFilter('tag', $event)"
@@ -334,6 +337,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
               class="grid grid-cols-1 gap-2 p-2 md:p-4 outline-none"
               [style.grid-template-columns]="galleryColsStyle()"
               (keydown)="onGridKeydown($event)"
+              (focusout)="onGridFocusOut($event)"
             >
               @for (photo of store.photos(); track photo.path; let i = $index) {
                 <app-photo-card
@@ -343,6 +347,8 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                   [attr.data-pidx]="i"
                   [config]="store.config()"
                   [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
+                  [isActive]="i === activeIndex()"
+                  [gridHasActiveCard]="hasActivePhoto()"
                   [hideDetails]="effectiveHideDetails()"
                   [currentSort]="store.filters().sort"
                   [thumbSize]="thumbSize()"
@@ -352,7 +358,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [panelActivation]="panelActivation()"
                   [style.content-visibility]="'auto'"
                   [style.contain-intrinsic-size]="'auto ' + (cardWidth() + 80) + 'px'"
-                  (selectionChange)="toggleSelection($event.photo, $event.event)"
+                  (selectionChange)="toggleSelection($event.photo, $event.event, i)"
                   (tooltipShow)="showTooltip($event.event, $event.photo)"
                   (tooltipHide)="hideTooltip()"
                   (tagClicked)="store.updateFilter('tag', $event)"
@@ -376,9 +382,16 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
               [attr.aria-label]="I18N.gallery.photo_grid | translate"
               class="flex flex-col gap-2 p-2 md:p-4 outline-none"
               (keydown)="onGridKeydown($event)"
+              (focusout)="onGridFocusOut($event)"
             >
               @for (row of mosaicRows(); track row.photos[0]?.path ?? $index) {
-                <div class="flex gap-2" style="content-visibility: auto; contain-intrinsic-size: auto 300px">
+                <!-- No content-visibility on the row: it comes with paint
+                     containment, which clipped the current photo's marker off
+                     at the row's top and bottom edge. Each card below still
+                     declares its own, so what is given up is only the
+                     row-level grouping of the skip -- and only here, in the
+                     branch that keeps every row in the DOM. -->
+                <div class="flex gap-2">
                   @for (photo of row.photos; track photo.path; let i = $index) {
                     <app-photo-card
                   [collapsedSequenceKinds]="collapsedSequenceKinds()"
@@ -391,13 +404,15 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [mosaicMode]="true"
                       [config]="store.config()"
                       [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
+                      [isActive]="row.startIndex + i === activeIndex()"
+                      [gridHasActiveCard]="hasActivePhoto()"
                       [currentSort]="store.filters().sort"
                       [thumbSize]="thumbSize()"
                       [isEditionMode]="auth.isEdition()"
                       [personFilterId]="store.filters().person_id"
                       [tooltipMode]="tooltipMode()"
                       [panelActivation]="panelActivation()"
-                      (selectionChange)="toggleSelection($event.photo, $event.event)"
+                      (selectionChange)="toggleSelection($event.photo, $event.event, row.startIndex + i)"
                       (tooltipShow)="showTooltip($event.event, $event.photo)"
                       (tooltipHide)="hideTooltip()"
                       (tagClicked)="store.updateFilter('tag', $event)"
@@ -515,7 +530,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
 
     <!-- Selection action bar -->
     @if (selectionCount()) {
-      <div class="fixed bottom-0 left-0 right-0 z-50 flex flex-wrap items-center justify-center gap-1 lg:gap-3 px-2 lg:px-6 py-1 lg:py-3 max-lg:pb-[max(0.25rem,env(safe-area-inset-bottom))] bg-[var(--mat-sys-surface-container)] border-t border-[var(--mat-sys-outline-variant)] shadow-lg">
+      <div data-selection-bar class="fixed bottom-0 left-0 right-0 z-50 flex flex-wrap items-center justify-center gap-1 lg:gap-3 px-2 lg:px-6 py-1 lg:py-3 max-lg:pb-[max(0.25rem,env(safe-area-inset-bottom))] bg-[var(--mat-sys-surface-container)] border-t border-[var(--mat-sys-outline-variant)] shadow-lg">
         <!-- Every loaded photo is selected, but the view runs past the pages
              fetched so far. Offer the rest explicitly on its own line (w-full
              in a wrapping row) rather than silently widening what was asked. -->
@@ -1130,12 +1145,62 @@ export class GalleryComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected toggleSelection(photo: Photo, event?: MouseEvent): void {
+  /** Selecting a photo with the pointer also moves the grid's cursor onto it,
+   *  so the next rating keystroke lands on the photo the user just clicked
+   *  rather than on wherever the arrow keys were left. The index comes from the
+   *  template because that is where it is already known -- it is the same
+   *  expression each call site feeds `data-pidx`, which is what `focusCard`
+   *  looks a card up by, so the cursor, the marker and the focus target cannot
+   *  drift apart. Deriving it here from the path would be a second answer to a
+   *  question the caller has already answered.
+   *
+   *  Focus is moved explicitly rather than left to the browser. A pointer click
+   *  does land focus on the card by itself, but only because `onSelect` lets
+   *  the default through, and only for a caller that really is a click; saying
+   *  it out loud makes the rule hold for any caller. It is also what lifts the
+   *  newly current card clear of the action bar that this very selection has
+   *  just raised over it. */
+  protected toggleSelection(photo: Photo, event: MouseEvent | undefined, index: number): void {
     this.store.toggleSelection(photo, event);
+    this.setCursor(index);
+    this.focusCard(index);
   }
 
   protected clearSelection(): void {
     this.store.clearSelection();
+    this.restoreCursorFocus();
+  }
+
+  /** Keep DOM focus wherever the marker is, so that a drawn marker always means
+   *  a live keyboard.
+   *
+   *  `onGridKeydown` is bound on the grid containers, so the arrows and the
+   *  rating keys only reach this component while focus is inside one of them.
+   *  The marker is component state and outlives focus, which is where the two
+   *  come apart: every route that empties the selection is driven from the
+   *  action bar, and the bar unmounts the instant the count reaches zero, so
+   *  the control that was just clicked takes focus down with it and the browser
+   *  falls back to `<body>`. The photo stays framed in tertiary while nothing
+   *  typed at it does anything -- the marker promising a keyboard that is no
+   *  longer listening.
+   *
+   *  Nothing is taken while focus is already inside a grid. That leaves Escape
+   *  alone: it is the one route in from the inside, standing on the very card
+   *  it would be sent to, so handling it here would only re-focus and re-scroll
+   *  a card the user has not left. And nothing is taken when the cursor is not
+   *  on a photo that is actually in the results, because then no marker is
+   *  drawn and there is no promise to keep -- the card still sitting at that
+   *  index until the grid re-renders is not the photo the cursor means.
+   *
+   *  Nothing is scrolled, either. The card is still exactly where the user left
+   *  it; an action bar unmounting is not a reason to move the viewport under
+   *  them. That also settles the windowed-out case: a card that is not in the
+   *  DOM holds no focus to hand back, so the retry that would page it in is
+   *  deliberately not entered. */
+  private restoreCursorFocus(): void {
+    if (!this.hasActivePhoto()) return;
+    if (document.activeElement?.closest('[role="grid"]')) return;
+    this.focusCard(this.activeIndex(), false, false);
   }
 
   /**
@@ -1541,8 +1606,11 @@ export class GalleryComponent implements OnInit, OnDestroy {
     });
     const applied = await firstValueFrom(ref.afterClosed());
     if (applied) {
-      this.clearSelection();
+      // Reload first: clearing the selection hands focus back to the marked
+      // card, and the rows the cull has just moved away are still standing in
+      // the list until this returns.
       await this.store.loadPhotos();
+      this.clearSelection();
     }
   }
 
@@ -1711,6 +1779,73 @@ export class GalleryComponent implements OnInit, OnDestroy {
   /** Index of the keyboard-focused photo; -1 when keyboard nav is inactive. */
   protected readonly activeIndex = signal(-1);
 
+  /** Path of the photo the cursor is standing on, kept in step with the index.
+   *
+   *  The index on its own only means anything against the list that was on
+   *  screen when it was set. A filter change that yields a result set of the
+   *  same length or longer keeps it in bounds, so the marker quietly reframes
+   *  an unrelated photo -- and that is where the next rating keystroke lands. */
+  private readonly activePath = signal<string | null>(null);
+
+  /** Move the cursor onto `index`, keeping the photo it means in step with it.
+   *  -1 -- or any index past the end -- clears both. */
+  private setCursor(index: number): void {
+    this.activeIndex.set(index);
+    this.activePath.set(this.store.photos()[index]?.path ?? null);
+  }
+
+  /** Re-find the marked photo whenever the result set changes, so the cursor
+   *  follows the photo rather than the slot, and drops to nothing once the
+   *  photo is no longer in the results. The scan is O(n) over the result set,
+   *  but it runs once per list change, not once per keystroke.
+   *
+   *  Only the list is tracked. The effect writes both cursor signals, so
+   *  reading them tracked would make it re-run on its own writes. */
+  private readonly cursorFollowsPhoto = effect(() => {
+    const photos = this.store.photos();
+    untracked(() => {
+      const path = this.activePath();
+      if (path === null) return;
+      const at = photos.findIndex(p => p.path === path);
+      if (at === this.activeIndex()) return;
+      this.activeIndex.set(at);
+      if (at < 0) this.activePath.set(null);
+    });
+  });
+
+  /** Drop the cursor when focus genuinely leaves a grid.
+   *
+   *  The cards fade everything that is not the current photo, so a marker left
+   *  standing while focus sits in the filter sidebar or a dialog dims the whole
+   *  gallery for a keyboard that is no longer listening -- and a mouse-only
+   *  user, who never puts focus back into a grid, would carry that from their
+   *  first click to the end of the session.
+   *
+   *  Two destinations do not count as leaving. Another card in the same grid is
+   *  the cursor moving, not going away. The selection action bar is where Clear
+   *  lives, and `clearSelection` has to be able to hand focus back to the marked
+   *  card afterwards, so the bar is excluded by name. A null relatedTarget --
+   *  focus dropped to the body, or out to the browser chrome -- does count. */
+  protected onGridFocusOut(event: FocusEvent): void {
+    const next = event.relatedTarget as HTMLElement | null;
+    if (next?.closest('[role="grid"], [data-selection-bar]')) return;
+    this.setCursor(-1);
+  }
+
+  /** Whether the cursor is actually standing on a photo that is on screen.
+   *
+   *  The cards fade everything that is not the current photo, so this has to be
+   *  false in both of the cases where there is nothing to leave at full
+   *  strength: before the cursor has ever moved (-1), and after a filter change
+   *  has left it pointing past the end of a shorter result set. Either one
+   *  would otherwise render the whole grid dimmed with nothing marked.
+   *
+   *  `cursorFollowsPhoto` normally resolves the second case to -1 outright, but
+   *  it runs when effects are flushed; this reads straight off the signals, so
+   *  it also covers the frame in between. */
+  protected readonly hasActivePhoto = computed(() =>
+    this.activeIndex() >= 0 && this.activeIndex() < this.store.photos().length);
+
   /** Columns per row in grid mode (mirrors the CSS auto-fill column math). */
   private gridColumns(): number {
     const width = this.containerWidth() - (this.isDesktop() ? 32 : 16);
@@ -1758,7 +1893,7 @@ export class GalleryComponent implements OnInit, OnDestroy {
     }
 
     event.preventDefault();
-    this.activeIndex.set(next);
+    this.setCursor(next);
     this.focusCard(next);
   }
 
@@ -1789,22 +1924,31 @@ export class GalleryComponent implements OnInit, OnDestroy {
     event.preventDefault();
     if (advance) {
       const next = Math.min(photos.length - 1, index + 1);
-      this.activeIndex.set(next);
+      this.setCursor(next);
       this.focusCard(next);
     }
   }
 
   /** Focus a card by photo index; if windowed out of the DOM, scroll its row
-   * into view first and retry once the window has rendered it. */
-  private focusCard(index: number, retried = false): void {
+   * into view first and retry once the window has rendered it.
+   *
+   * The tile inside the card takes the focus -- it is what carries the tabindex
+   * -- but the card itself is what gets scrolled: `scroll-margin` does not
+   * inherit, and the clearance that lifts the current photo out from under the
+   * action bar is declared on the card host. Asking the tile would ask an
+   * element that has none.
+   *
+   * `scroll = false` places focus without moving the viewport, and gives up on
+   * a card that is not in the DOM rather than paging it in. */
+  private focusCard(index: number, retried = false, scroll = true): void {
     const host = document.querySelector(`[data-pidx="${index}"]`) as HTMLElement | null;
     if (host) {
       const focusable = (host.querySelector('[tabindex]') as HTMLElement | null) ?? host;
-      focusable.focus();
-      focusable.scrollIntoView({ block: 'nearest' });
+      focusable.focus({ preventScroll: !scroll });
+      if (scroll) host.scrollIntoView({ block: 'nearest' });
       return;
     }
-    if (retried || !this.virtualOn()) return;
+    if (retried || !scroll || !this.virtualOn()) return;
     const row = this.rowsModel().find(r =>
       index >= r.startIndex && index < r.startIndex + r.photos.length);
     const content = this.scrollContent();

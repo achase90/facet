@@ -790,7 +790,7 @@ All stats are user-aware in multi-user mode — each user sees analytics for the
 
 | Key | Action |
 |-----|--------|
-| `←` `→` `↑` `↓` | Move keyboard focus between photo cards (grid columns and mosaic rows) |
+| `←` `→` `↑` `↓` | Move the current-photo marker between photo cards (grid columns and mosaic rows) |
 | `Enter` | Open the focused photo |
 | `Space` | Select / deselect the focused photo |
 | `Ctrl+A` | Select all — the whole filtered view from an empty selection (no request), otherwise the loaded photos |
@@ -798,6 +798,8 @@ All stats are user-aware in multi-user mode — each user sees analytics for the
 | `Shift+Click` | Range-select photos between last selected and clicked |
 | `Double-click` | Open photo |
 | `?` | Show the keyboard shortcuts reference (works on every page) |
+
+The current photo — the one star-rating, favorite and reject shortcuts act on — is marked with a 4px outline around its card; every other card dims to 50% opacity. Nothing is marked until the cursor has actually moved onto a photo in the results, so a gallery you have not navigated yet stays at full strength. Clicking a photo moves the marker onto it, so a shortcut typed right after a click lands on the photo you clicked, not on wherever the arrow keys last left it.
 
 ## Undo
 

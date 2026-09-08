@@ -744,7 +744,7 @@ Tutte le statistiche sono consapevoli dell'utente in modalità multiutente — o
 
 | Tasto | Azione |
 |-----|--------|
-| `←` `→` `↑` `↓` | Sposta il focus della tastiera tra le schede foto (colonne della griglia e righe del mosaico) |
+| `←` `→` `↑` `↓` | Sposta il marcatore della foto corrente tra le schede foto (colonne della griglia e righe del mosaico) |
 | `Enter` | Apri la foto a fuoco |
 | `Space` | Seleziona / deseleziona la foto a fuoco |
 | `Ctrl+A` | Seleziona tutto — l'intera vista filtrata da una selezione vuota (nessuna richiesta), altrimenti le foto caricate |
@@ -752,6 +752,8 @@ Tutte le statistiche sono consapevoli dell'utente in modalità multiutente — o
 | `Shift+Click` | Selezione di un intervallo di foto tra l'ultima selezionata e quella cliccata |
 | `Double-click` | Apri la foto |
 | `?` | Mostra il riferimento delle scorciatoie da tastiera (funziona su ogni pagina) |
+
+La foto corrente — quella su cui agiscono le scorciatoie di valutazione, preferito e scarto — è contrassegnata da un contorno di 4px attorno alla sua scheda; tutte le altre schede si affievoliscono al 50% di opacità. Nulla è contrassegnato finché il cursore non si è effettivamente spostato su una foto tra i risultati, quindi una galleria che non hai ancora esplorato resta a piena intensità. Cliccare su una foto sposta il marcatore su di essa, così una scorciatoia digitata subito dopo un clic si applica alla foto cliccata, non a quella dove le frecce l'avevano lasciata.
 
 ## Annulla
 

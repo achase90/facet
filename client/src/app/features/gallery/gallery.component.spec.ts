@@ -1,9 +1,10 @@
 import type { Mock } from 'vitest';
-import { TestBed } from '@angular/core/testing';
-import { computed, signal } from '@angular/core';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { computed, signal, WritableSignal } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { Subject, of, throwError } from 'rxjs';
 import { MatDialog } from '@angular/material/dialog';
+import { provideNativeDateAdapter } from '@angular/material/core';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { LiveAnnouncer } from '@angular/cdk/a11y';
 import { GalleryStore, GalleryFilters, DEFAULT_FILTERS } from './gallery.store';
@@ -15,6 +16,7 @@ import { AlbumService } from '../../core/services/album.service';
 import { GalleryComponent } from './gallery.component';
 import { ScoreClassPipe } from '../../shared/pipes/score.pipes';
 import { MAX_COMPARE_PANES } from './synced-zoom.component';
+import { gridColumnCount } from './gallery-rows.util';
 import { UndoService } from '../../core/services/undo.service';
 
 describe('GalleryComponent', () => {
@@ -24,7 +26,13 @@ describe('GalleryComponent', () => {
   let mockStore: any;
   let mockApi: { thumbnailUrl: Mock; post: Mock; downloadUrl: Mock; getRaw: Mock };
   let mockAuth: Record<string, unknown>;
-  let mockI18n: { t: Mock };
+  // `translations` and `lang` are only read once the real template renders:
+  // the translate pipe subscribes to the bundle even when `t` is stubbed.
+  let mockI18n: {
+    t: Mock;
+    translations: WritableSignal<Record<string, unknown>>;
+    lang: WritableSignal<string>;
+  };
   let routeMock: { snapshot: { paramMap: { get: Mock }; queryParams: Record<string, string> } };
 
   beforeEach(() => {
@@ -98,6 +106,15 @@ describe('GalleryComponent', () => {
       batchReject: vi.fn(() => Promise.resolve({ snapshot: new Map(), targeted: 0, count: 0 })),
       batchRating: vi.fn(() => Promise.resolve({ snapshot: new Map(), targeted: 0, count: 0 })),
       patchSequenceOverride: vi.fn(),
+      // Read only once the real template renders -- the toolbar, the filter
+      // sidebar and the slideshow all pull off the store directly.
+      slideshowActive: signal(false),
+      patterns: signal([]),
+      colorTemps: signal([]),
+      hueBuckets: signal([]),
+      metricRanges: signal({}),
+      gpsLocationName: signal(''),
+      viewFilterParams: signal({}),
     };
 
     mockApi = {
@@ -111,12 +128,15 @@ describe('GalleryComponent', () => {
 
     mockI18n = {
       t: vi.fn((key: string) => key),
+      translations: signal<Record<string, unknown>>({}),
+      lang: signal('en'),
     };
 
     routeMock = { snapshot: { paramMap: { get: vi.fn(() => null) }, queryParams: {} } };
 
     TestBed.configureTestingModule({
       providers: [
+        provideNativeDateAdapter(),
         { provide: GalleryStore, useValue: mockStore },
         { provide: ApiService, useValue: mockApi },
         { provide: AuthService, useValue: mockAuth },
@@ -140,6 +160,29 @@ describe('GalleryComponent', () => {
     });
     component = TestBed.runInInjectionContext(() => new GalleryComponent());
   });
+
+  // Shared by every cursor describe below. The component is built without a
+  // fixture, so each of these stands in for something the template would
+  // otherwise wire up, invoked straight on the instance.
+  function activeIndex(): number {
+    return (component as unknown as { activeIndex(): number }).activeIndex();
+  }
+
+  function hasActivePhoto(): boolean {
+    return (component as unknown as { hasActivePhoto(): boolean }).hasActivePhoto();
+  }
+
+  function click(photo: { path: string }, index: number): void {
+    (component as unknown as {
+      toggleSelection(p: unknown, e: MouseEvent | undefined, i: number): void;
+    }).toggleSelection(photo, undefined, index);
+  }
+
+  function press(key: string): void {
+    const ev = new KeyboardEvent('keydown', { key });
+    Object.defineProperty(ev, 'target', { value: null, configurable: true });
+    (component as unknown as { onGridKeydown(e: KeyboardEvent): void }).onGridKeydown(ev);
+  }
 
   describe('ScoreClassPipe', () => {
     let pipe: ScoreClassPipe;
@@ -197,10 +240,6 @@ describe('GalleryComponent', () => {
       (component as unknown as { onGridKeydown(e: KeyboardEvent): void }).onGridKeydown(ev);
     }
 
-    function activeIndex(): number {
-      return (component as unknown as { activeIndex(): number }).activeIndex();
-    }
-
     it('sets the star rating and advances on digit keys', () => {
       fire(keyEvent('3'));
       expect(mockStore.setRating).toHaveBeenCalledWith('/a.jpg', 3);
@@ -235,6 +274,430 @@ describe('GalleryComponent', () => {
       fire(keyEvent('1'));
       expect(mockStore.setRating).not.toHaveBeenCalled();
     });
+  });
+
+  describe('the current photo', () => {
+    beforeEach(() => {
+      mockStore.photos.set([{ path: '/a.jpg' }, { path: '/b.jpg' }, { path: '/c.jpg' }]);
+      mockStore.config.set({ features: { show_rating_controls: true } });
+      (mockAuth as { isEdition: unknown }).isEdition = vi.fn(() => true);
+    });
+
+    it('marks nothing before the cursor has ever moved, so nothing is dimmed at rest', () => {
+      expect(activeIndex()).toBe(-1);
+      expect(hasActivePhoto()).toBe(false);
+    });
+
+    it('moves onto the photo the pointer just clicked', () => {
+      click({ path: '/c.jpg' }, 2);
+      expect(activeIndex()).toBe(2);
+      expect(hasActivePhoto()).toBe(true);
+    });
+
+    it('still hands the click to the store', () => {
+      const photo = { path: '/b.jpg' };
+      click(photo, 1);
+      expect(mockStore.toggleSelection).toHaveBeenCalledWith(photo, undefined);
+    });
+
+    it('rates the photo that was clicked, not the one the arrow keys were left on', () => {
+      // The defect: the pointer never moved the cursor, so a rating typed after
+      // a click landed on whatever the keyboard had been on. Silently.
+      press('ArrowRight');
+      expect(activeIndex()).toBe(1);
+      click({ path: '/c.jpg' }, 2);
+      press('3');
+      expect(mockStore.setRating).toHaveBeenCalledWith('/c.jpg', 3);
+    });
+
+    it('still moves with the arrow keys once a click has placed it', () => {
+      click({ path: '/a.jpg' }, 0);
+      press('ArrowRight');
+      expect(activeIndex()).toBe(1);
+      press('ArrowLeft');
+      expect(activeIndex()).toBe(0);
+      press('End');
+      expect(activeIndex()).toBe(2);
+    });
+
+    it('reports no current photo when a shorter result set leaves the cursor past the end', () => {
+      // Otherwise the grid would render every card dimmed with none marked.
+      click({ path: '/c.jpg' }, 2);
+      mockStore.photos.set([{ path: '/a.jpg' }]);
+      expect(hasActivePhoto()).toBe(false);
+    });
+
+    describe('follows the photo, not the slot it was in', () => {
+      // A bounds check only catches the result set getting shorter. One of the
+      // same length or longer keeps the index legal, so the marker reframes
+      // whatever photo has moved into that slot -- and the next rating keystroke
+      // lands there.
+      it('re-finds the marked photo when the results are reordered', () => {
+        click({ path: '/c.jpg' }, 2);
+
+        mockStore.photos.set([{ path: '/c.jpg' }, { path: '/a.jpg' }, { path: '/b.jpg' }]);
+        TestBed.tick();
+
+        expect(activeIndex()).toBe(0);
+        press('3');
+        expect(mockStore.setRating).toHaveBeenCalledWith('/c.jpg', 3);
+      });
+
+      it('drops the cursor when the marked photo is gone but the count is not', () => {
+        click({ path: '/c.jpg' }, 2);
+
+        mockStore.photos.set([{ path: '/a.jpg' }, { path: '/b.jpg' }, { path: '/d.jpg' }]);
+        TestBed.tick();
+
+        expect(activeIndex()).toBe(-1);
+        expect(hasActivePhoto()).toBe(false);
+      });
+
+      it('leaves the cursor alone when the photo has not moved', () => {
+        click({ path: '/b.jpg' }, 1);
+
+        mockStore.photos.set([
+          { path: '/a.jpg' }, { path: '/b.jpg' }, { path: '/c.jpg' }, { path: '/d.jpg' },
+        ]);
+        TestBed.tick();
+
+        expect(activeIndex()).toBe(1);
+      });
+
+      it('does nothing at all before the cursor has been placed', () => {
+        mockStore.photos.set([{ path: '/x.jpg' }, { path: '/y.jpg' }]);
+        TestBed.tick();
+
+        expect(activeIndex()).toBe(-1);
+      });
+
+      // The three sites that move the cursor have to record the photo as well
+      // as the index; a missed one leaves the marker following the slot again.
+      it('follows a cursor the arrow keys placed', () => {
+        press('ArrowRight');
+        expect(activeIndex()).toBe(1);
+
+        mockStore.photos.set([{ path: '/c.jpg' }, { path: '/a.jpg' }, { path: '/b.jpg' }]);
+        TestBed.tick();
+
+        expect(activeIndex()).toBe(2);
+      });
+
+      it('follows a cursor the rate-and-advance keys left behind', () => {
+        click({ path: '/a.jpg' }, 0);
+        press('3');
+        expect(activeIndex()).toBe(1);
+
+        mockStore.photos.set([{ path: '/b.jpg' }, { path: '/a.jpg' }, { path: '/c.jpg' }]);
+        TestBed.tick();
+
+        expect(activeIndex()).toBe(0);
+      });
+    });
+  });
+
+  describe('focus follows the current photo', () => {
+    let grid: HTMLElement;
+    let barRoot: HTMLElement;
+    let bar: HTMLButtonElement;
+
+    beforeEach(() => {
+      mockStore.photos.set([{ path: '/a.jpg' }, { path: '/b.jpg' }, { path: '/c.jpg' }]);
+      mockStore.config.set({ features: { show_rating_controls: true } });
+      (mockAuth as { isEdition: unknown }).isEdition = vi.fn(() => true);
+
+      // The component is built without a fixture, so the grid its template
+      // would render is stood up by hand: focusCard looks a card up by its
+      // data-pidx and focuses the first [tabindex] inside it, and the key
+      // handler is bound on the role="grid" ancestor.
+      grid = document.createElement('div');
+      grid.setAttribute('role', 'grid');
+      grid.tabIndex = 0;
+      for (const index of [0, 1, 2]) {
+        const card = document.createElement('div');
+        card.setAttribute('data-pidx', String(index));
+        const tile = document.createElement('div');
+        tile.tabIndex = 0;
+        // jsdom lays nothing out and so implements no scrolling, but focusCard
+        // really does make the call and it has to land somewhere. Both ends of
+        // the card are stubbed because which one is scrolled is the point: the
+        // tile takes focus, the card -- which is where scroll-margin lives --
+        // is what gets scrolled.
+        card.scrollIntoView = vi.fn();
+        tile.scrollIntoView = vi.fn();
+        card.appendChild(tile);
+        grid.appendChild(card);
+      }
+      document.body.appendChild(grid);
+
+      // Stands in for the action bar's Clear button: outside the grid, and
+      // about to be unmounted by the very click that put focus on it. The
+      // wrapper carries the marker the grid's focusout handler looks for.
+      barRoot = document.createElement('div');
+      barRoot.setAttribute('data-selection-bar', '');
+      bar = document.createElement('button');
+      barRoot.appendChild(bar);
+      document.body.appendChild(barRoot);
+    });
+
+    afterEach(() => {
+      grid.remove();
+      barRoot.remove();
+    });
+
+    function cardAt(index: number): HTMLElement {
+      return grid.querySelector(`[data-pidx="${index}"]`) as HTMLElement;
+    }
+
+    function tileAt(index: number): HTMLElement {
+      return grid.querySelector(`[data-pidx="${index}"] [tabindex]`) as HTMLElement;
+    }
+
+    function clear(): void {
+      (component as unknown as { clearSelection(): void }).clearSelection();
+    }
+
+    function focusOut(next: HTMLElement | null): void {
+      (component as unknown as { onGridFocusOut(e: FocusEvent): void })
+        .onGridFocusOut({ relatedTarget: next } as unknown as FocusEvent);
+    }
+
+    it('puts the cursor and the focus on the same card when a photo is clicked', () => {
+      click({ path: '/c.jpg' }, 2);
+      expect(activeIndex()).toBe(2);
+      expect(document.activeElement).toBe(tileAt(2));
+      // The card, not the tile: scroll-margin does not inherit, and the
+      // clearance that lifts the photo out from under the action bar is
+      // declared on the card host. Scrolling the tile asks an element that
+      // carries none, so the clearance is silently dropped.
+      expect(cardAt(2).scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
+      expect(tileAt(2).scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it('hands focus back to the marked photo when the selection is cleared', () => {
+      click({ path: '/b.jpg' }, 1);
+      bar.focus();
+      expect(document.activeElement).toBe(bar);
+
+      clear();
+
+      expect(document.activeElement).toBe(tileAt(1));
+    });
+
+    it('leaves focus somewhere the grid key handler still receives events', () => {
+      // The invariant as the user meets it: a marker is drawn, so the arrow
+      // keys have to work. onGridKeydown is bound on the grid, which makes that
+      // true only while focus is inside one -- and <body> is not.
+      click({ path: '/b.jpg' }, 1);
+      bar.focus();
+      clear();
+
+      const seen: string[] = [];
+      grid.addEventListener('keydown', event => seen.push((event as KeyboardEvent).key));
+      (document.activeElement as HTMLElement)
+        .dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+
+      expect(seen).toEqual(['ArrowRight']);
+    });
+
+    it('keeps the marker and the keystroke target agreeing after a clear', () => {
+      click({ path: '/b.jpg' }, 1);
+      bar.focus();
+      clear();
+
+      expect(activeIndex()).toBe(1);
+      expect(document.activeElement).toBe(tileAt(1));
+      press('3');
+      expect(mockStore.setRating).toHaveBeenCalledWith('/b.jpg', 3);
+    });
+
+    it('brings focus back from a batch action that empties the selection too', async () => {
+      // The Clear button is only the shortest way in. Every batch action ends
+      // the same way, from a control on the same bar.
+      click({ path: '/b.jpg' }, 1);
+      bar.focus();
+
+      await (component as unknown as { batchFavorite(): Promise<void> }).batchFavorite();
+
+      expect(mockStore.clearSelection).toHaveBeenCalled();
+      expect(document.activeElement).toBe(tileAt(1));
+    });
+
+    it('does not re-focus or re-scroll for an Escape that came from the grid', () => {
+      click({ path: '/b.jpg' }, 1);
+      mockStore.selectionCount.set(1);
+      (cardAt(1).scrollIntoView as unknown as Mock).mockClear();
+
+      press('Escape');
+
+      expect(mockStore.clearSelection).toHaveBeenCalled();
+      expect(document.activeElement).toBe(tileAt(1));
+      expect(cardAt(1).scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it('does not chase a cursor a narrower filter has left pointing past the end', () => {
+      // Nothing is marked in that state, so there is no promise to keep, and
+      // the card still standing at that index until the grid re-renders is not
+      // the photo the cursor means.
+      click({ path: '/c.jpg' }, 2);
+      mockStore.photos.set([{ path: '/a.jpg' }]);
+      bar.focus();
+
+      clear();
+
+      expect(document.activeElement).toBe(bar);
+    });
+
+    it('hands focus back without moving the viewport', () => {
+      // The card is still exactly where the user left it, and the action bar
+      // unmounting is not a reason to scroll the gallery under them.
+      click({ path: '/b.jpg' }, 1);
+      (cardAt(1).scrollIntoView as unknown as Mock).mockClear();
+      bar.focus();
+
+      clear();
+
+      expect(document.activeElement).toBe(tileAt(1));
+      expect(cardAt(1).scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    describe('the cursor is dropped when focus leaves the grid', () => {
+      // Without this, one mouse click dims the gallery for the rest of the
+      // session: the marker fades every other card, and a mouse-only user
+      // never puts focus back into a grid to move it off.
+      it('resets when focus moves to something outside the grid', () => {
+        const sidebar = document.createElement('input');
+        document.body.appendChild(sidebar);
+        click({ path: '/b.jpg' }, 1);
+
+        focusOut(sidebar);
+
+        expect(activeIndex()).toBe(-1);
+        expect(hasActivePhoto()).toBe(false);
+        sidebar.remove();
+      });
+
+      it('resets when focus falls to the page rather than to an element', () => {
+        click({ path: '/b.jpg' }, 1);
+
+        focusOut(null);
+
+        expect(activeIndex()).toBe(-1);
+      });
+
+      it('does not reset while the cursor is only moving between cards', () => {
+        click({ path: '/a.jpg' }, 0);
+
+        focusOut(tileAt(2));
+
+        expect(activeIndex()).toBe(0);
+      });
+
+      it('does not reset for the action bar, which still has to hand focus back', () => {
+        click({ path: '/b.jpg' }, 1);
+
+        focusOut(bar);
+        expect(activeIndex()).toBe(1);
+
+        clear();
+        expect(document.activeElement).toBe(tileAt(1));
+      });
+    });
+  });
+
+  // Every other spec in this file hand-builds the grid, so the three template
+  // expressions the marker rides on -- `row.startIndex + i` in the windowed and
+  // mosaic branches, a bare `i` in the plain grid -- are never rendered.
+  // Dropping `row.startIndex +` from one of them would put the marker on the
+  // wrong photo with the whole suite green. These render the real template and
+  // identify cards by their position in the grid, never by the data-pidx the
+  // same expression writes.
+  describe('the marker lands on the card that was clicked (rendered)', () => {
+    const photos = Array.from({ length: 12 }, (_, n) => ({
+      path: `/p${n}.jpg`, filename: `p${n}.jpg`, image_width: 4000, image_height: 3000,
+    }));
+    let fixture: ComponentFixture<GalleryComponent> | null = null;
+
+    afterEach(() => {
+      fixture?.destroy();
+      fixture = null;
+      vi.unstubAllGlobals();
+    });
+
+    function render(mode: 'grid' | 'mosaic', virtual: boolean): HTMLElement[] {
+      mockStore.photos.set(photos);
+      mockStore.config.set({ features: { show_rating_controls: true } });
+      mockStore.galleryMode.set(mode);
+      mockStore.virtualScroll.set(virtual);
+      fixture = TestBed.createComponent(GalleryComponent);
+      const instance = fixture.componentInstance as unknown as {
+        desktop: { setup(): void };
+        containerWidth: { set(v: number): void };
+      };
+      if (mode === 'mosaic' || virtual) {
+        // The row-based branches need a desktop-width container that has been
+        // measured, and jsdom lays nothing out: widen the media query the way
+        // the rail specs do, and feed the width the ResizeObserver would have.
+        vi.stubGlobal('matchMedia', (media: string) => ({
+          matches: true, media, addEventListener() {}, removeEventListener() {},
+        }));
+        instance.desktop.setup();
+        instance.containerWidth.set(1200);
+      }
+      fixture.detectChanges();
+      // A branch that quietly fell back to the plain grid would satisfy every
+      // assertion below without ever rendering the expression under test.
+      expect(fixture.componentInstance.effectiveGalleryMode()).toBe(mode);
+      expect(fixture.componentInstance.virtualOn()).toBe(virtual);
+      const cards = [...fixture.nativeElement.querySelectorAll('app-photo-card')] as HTMLElement[];
+      // Two rows at least, so the card the specs reach for is never in the first.
+      expect(cards.length).toBeGreaterThan(gridColumnCount(1200 - 32, 300, 8, true));
+      return cards;
+    }
+
+    function clickCard(card: HTMLElement): void {
+      (card.querySelector('[role="button"]') as HTMLElement).click();
+      fixture!.detectChanges();
+    }
+
+    function markedCard(cards: HTMLElement[]): number {
+      return cards.findIndex(c => c.querySelector('[aria-current="true"]'));
+    }
+
+    for (const [name, mode, virtual] of [
+      ['plain grid', 'grid', false],
+      ['mosaic', 'mosaic', false],
+      ['windowed rows', 'mosaic', true],
+    ] as const) {
+      it(`indexes every card by its place in the results (${name})`, () => {
+        const cards = render(mode, virtual);
+        expect(cards.map(c => c.getAttribute('data-pidx')))
+          .toEqual(cards.map((_, n) => String(n)));
+      });
+
+      it(`marks the card that was clicked, not the one at its offset in the row (${name})`, () => {
+        const cards = render(mode, virtual);
+        const target = cards.length - 2; // past the first row in every branch
+
+        clickCard(cards[target]);
+
+        expect(markedCard(cards)).toBe(target);
+      });
+
+      // The handler is unit-tested above; what only a rendered template can say
+      // is that all three grid containers are actually bound to it.
+      it(`drops the marker when focus leaves the grid (${name})`, () => {
+        const cards = render(mode, virtual);
+        clickCard(cards[cards.length - 2]);
+        expect(markedCard(cards)).toBeGreaterThan(-1);
+
+        (fixture!.nativeElement.querySelector('[role="grid"]') as HTMLElement)
+          .dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+        fixture!.detectChanges();
+
+        expect(markedCard(cards)).toBe(-1);
+      });
+    }
   });
 
   describe('ngOnInit()', () => {
@@ -796,6 +1259,26 @@ describe('GalleryComponent', () => {
       const data = (dialog.open as Mock).mock.calls[0][1].data;
       expect(data.trashAvailable).toBe(false);
       expect(data.allowTrash).toBe(false);
+    });
+
+    it('reloads the list before clearing the selection', async () => {
+      // Clearing hands focus back to the marked card, and until the reload
+      // returns the rows the cull has just moved away are still in the list --
+      // so the focus would be aimed at a photo that no longer exists.
+      mockStore.config.set({});
+      select(['/a.jpg', '/b.jpg']);
+      const dialog = TestBed.inject(MatDialog);
+      (dialog.open as Mock).mockReturnValue({ afterClosed: () => of(true) });
+      const order: string[] = [];
+      mockStore.loadPhotos.mockImplementation(() => {
+        order.push('load');
+        return Promise.resolve();
+      });
+      mockStore.clearSelection.mockImplementation(() => order.push('clear'));
+
+      await component.openCullDialog();
+
+      expect(order).toEqual(['load', 'clear']);
     });
 
     // The guard reads `if (!viewScoped && !paths.length) return;` -- widened

@@ -547,3 +547,126 @@ describe('PhotoCardComponent tooltip emission', () => {
   });
 
 });
+
+describe('PhotoCardComponent current-photo marker', () => {
+  const mockI18n = { t: vi.fn((key: string) => key), currentLang: vi.fn(() => 'en'), locale: vi.fn(() => 'en'), translations: vi.fn(() => ({})) };
+
+  interface MarkerInputs { isActive?: boolean; gridHasActiveCard?: boolean; isSelected?: boolean }
+
+  function createCard(inputs: MarkerInputs = {}): ComponentFixture<PhotoCardComponent> {
+    TestBed.configureTestingModule({
+      imports: [PhotoCardComponent],
+      providers: [{ provide: I18nService, useValue: mockI18n }],
+    });
+    const fixture = TestBed.createComponent(PhotoCardComponent);
+    fixture.componentRef.setInput('photo', makePhoto());
+    for (const [name, value] of Object.entries(inputs)) fixture.componentRef.setInput(name, value);
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  /** The marker is asserted on the HOST, not on the tile inside it. The host
+   *  carries `content-visibility: auto`, whose paint containment clips whatever
+   *  a descendant draws outside the card -- so only the host's own outline
+   *  reaches the gutter. */
+  function host(fixture: ComponentFixture<PhotoCardComponent>): HTMLElement {
+    return fixture.nativeElement as HTMLElement;
+  }
+
+  function tile(fixture: ComponentFixture<PhotoCardComponent>): HTMLElement {
+    return fixture.nativeElement.querySelector('div[role="button"]') as HTMLElement;
+  }
+
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('is neither current nor dimmed by default', () => {
+    const fixture = createCard();
+    expect(fixture.componentInstance.isActive()).toBe(false);
+    expect(fixture.componentInstance.gridHasActiveCard()).toBe(false);
+    expect(host(fixture).classList.contains('outline-4')).toBe(false);
+    expect(host(fixture).classList.contains('opacity-50')).toBe(false);
+  });
+
+  it('frames the current card with an outline offset off the photo', () => {
+    const classes = host(createCard({ isActive: true, gridHasActiveCard: true })).classList;
+    expect(classes.contains('outline-4')).toBe(true);
+    expect(classes.contains('outline-[var(--mat-sys-tertiary)]')).toBe(true);
+    expect(classes.contains('outline-offset-2')).toBe(true);
+    expect(classes.contains('z-10')).toBe(true);
+  });
+
+  it('leaves the current card at full strength', () => {
+    expect(host(createCard({ isActive: true, gridHasActiveCard: true })).classList.contains('opacity-50'))
+      .toBe(false);
+  });
+
+  it('dims a card that is not the current one', () => {
+    const fixture = createCard({ isActive: false, gridHasActiveCard: true });
+    expect(host(fixture).classList.contains('opacity-50')).toBe(true);
+    expect(host(fixture).classList.contains('outline-4')).toBe(false);
+  });
+
+  it('dims nothing while the grid has no current photo at all', () => {
+    // The gallery's cursor is -1 until it first lands somewhere. Dimming on
+    // that state would fade every tile of a gallery nobody has navigated yet,
+    // which is the whole grid on first load.
+    expect(host(createCard({ isActive: false, gridHasActiveCard: false })).classList.contains('opacity-50'))
+      .toBe(false);
+  });
+
+  it('keeps the selection ring and the current-photo frame telling different stories', () => {
+    // A card can be both at once: selection is the set the batch actions act
+    // on, current is the one photo the next rating keystroke lands on.
+    const fixture = createCard({ isActive: true, gridHasActiveCard: true, isSelected: true });
+    expect(tile(fixture).classList.contains('ring-2')).toBe(true);
+    expect(tile(fixture).classList.contains('ring-[var(--mat-sys-primary)]')).toBe(true);
+    expect(host(fixture).classList.contains('outline-[var(--mat-sys-tertiary)]')).toBe(true);
+  });
+
+  it('does not dim a card that is merely unselected', () => {
+    expect(host(createCard({ isSelected: false })).classList.contains('opacity-50')).toBe(false);
+  });
+
+  it('reports the current card to assistive technology', () => {
+    expect(tile(createCard({ isActive: true })).getAttribute('aria-current')).toBe('true');
+  });
+
+  it('says nothing about a card that is not the current one', () => {
+    expect(tile(createCard()).getAttribute('aria-current')).toBeNull();
+  });
+
+  it('keeps the focus-visible outline, which still means genuine keyboard focus', () => {
+    expect(tile(createCard({ isActive: true })).className).toContain('focus-visible:outline-2');
+  });
+
+  it('reserves room for the frame and for the bar the grid scrolls it under', () => {
+    // The grid moves its cursor with scrollIntoView({ block: 'nearest' }),
+    // which stops at the scrollport's edge and knows nothing of the action bar
+    // fixed across the bottom of it.
+    const classes = host(createCard()).classList;
+    expect(classes.contains('scroll-mb-28')).toBe(true);
+    expect(classes.contains('scroll-mt-2')).toBe(true);
+  });
+
+  it('reserves it whether or not it is the current card', () => {
+    // Deliberately unconditional: scroll-margin does nothing until something
+    // calls scrollIntoView on the card, and the one caller runs inside the
+    // keydown handler, ahead of the change detection a conditional class would
+    // be waiting on.
+    const classes = host(createCard({ isActive: true, gridHasActiveCard: true })).classList;
+    expect(classes.contains('scroll-mb-28')).toBe(true);
+    expect(classes.contains('scroll-mt-2')).toBe(true);
+  });
+
+  it('carries the class that cancels the dimming under "reduce transparency"', () => {
+    // jsdom cannot evaluate `prefers-reduced-transparency`, so this only proves
+    // the class is BOUND to the host, not that the media query wins the
+    // cascade at runtime -- that is proven separately against the built
+    // production stylesheet, where `.reduce-transparency\:opacity-100` (inside
+    // the `@media (prefers-reduced-transparency: reduce)` block) must appear
+    // AFTER the plain `.opacity-50` rule, since both are single-class
+    // selectors and source order, not specificity, decides which wins.
+    const classes = host(createCard({ isActive: false, gridHasActiveCard: true })).classList;
+    expect(classes.contains('reduce-transparency:opacity-100')).toBe(true);
+  });
+});

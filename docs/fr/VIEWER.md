@@ -745,7 +745,7 @@ Toutes les statistiques tiennent compte de l'utilisateur en mode multi-utilisate
 
 | Touche | Action |
 |-----|--------|
-| `←` `→` `↑` `↓` | Déplacer le focus clavier entre les cartes de photo (colonnes de grille et lignes de mosaïque) |
+| `←` `→` `↑` `↓` | Déplacer le marqueur de la photo courante entre les cartes de photo (colonnes de grille et lignes de mosaïque) |
 | `Enter` | Ouvrir la photo focalisée |
 | `Space` | Sélectionner / désélectionner la photo focalisée |
 | `Ctrl+A` | Tout sélectionner — toute la vue filtrée depuis une sélection vide (sans requête), sinon les photos chargées |
@@ -753,6 +753,8 @@ Toutes les statistiques tiennent compte de l'utilisateur en mode multi-utilisate
 | `Shift+Click` | Sélection par plage des photos entre la dernière sélectionnée et celle cliquée |
 | `Double-click` | Ouvrir la photo |
 | `?` | Afficher la référence des raccourcis clavier (fonctionne sur chaque page) |
+
+La photo courante — celle sur laquelle agissent les raccourcis de note, de favori et de rejet — est marquée par un contour de 4px autour de sa carte ; toutes les autres cartes passent à 50% d'opacité. Rien n'est marqué tant que le curseur ne s'est pas réellement déplacé sur une photo des résultats, si bien qu'une galerie que vous n'avez pas encore parcourue reste à pleine intensité. Cliquer sur une photo y déplace le marqueur, si bien qu'un raccourci tapé juste après un clic s'applique à la photo cliquée, et non à celle où les flèches l'avaient laissé.
 
 ## Annuler
 
