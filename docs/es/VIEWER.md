@@ -742,7 +742,7 @@ Todas las estadísticas tienen conciencia de usuario en modo multiusuario: cada 
 
 | Tecla | Acción |
 |-----|--------|
-| `←` `→` `↑` `↓` | Mover el foco del teclado entre las tarjetas de foto (columnas de cuadrícula y filas de mosaico) |
+| `←` `→` `↑` `↓` | Mover el marcador de la foto actual entre las tarjetas de foto (columnas de cuadrícula y filas de mosaico) |
 | `Enter` | Abrir la foto enfocada |
 | `Space` | Seleccionar / deseleccionar la foto enfocada |
 | `Ctrl+A` | Seleccionar todas las fotos cargadas |
@@ -750,6 +750,8 @@ Todas las estadísticas tienen conciencia de usuario en modo multiusuario: cada 
 | `Shift+Click` | Seleccionar el rango de fotos entre la última seleccionada y la pulsada |
 | `Double-click` | Abrir la foto |
 | `?` | Mostrar la referencia de atajos de teclado (funciona en todas las páginas) |
+
+La foto actual — aquella sobre la que actúan los atajos de valoración, favorito y descarte — está marcada con un contorno de 4px alrededor de su tarjeta; el resto de las tarjetas baja al 50% de opacidad. Nada queda marcado hasta que el cursor se ha movido realmente sobre una foto de los resultados, así que una galería que aún no has recorrido permanece a intensidad completa. Al hacer clic en una foto, el marcador se mueve a ella, de modo que un atajo pulsado justo después de un clic se aplica a la foto en la que hiciste clic, no a la que dejaron las flechas.
 
 ## Deshacer
 

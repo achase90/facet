@@ -742,7 +742,7 @@ Todas as estatísticas são sensíveis ao usuário no modo multiusuário — cad
 
 | Tecla | Ação |
 |-----|--------|
-| `←` `→` `↑` `↓` | Move o foco do teclado entre os cartões de foto (colunas da grade e linhas do mosaico) |
+| `←` `→` `↑` `↓` | Move o marcador da foto atual entre os cartões de foto (colunas da grade e linhas do mosaico) |
 | `Enter` | Abre a foto em foco |
 | `Space` | Seleciona / desseleciona a foto em foco |
 | `Ctrl+A` | Seleciona todas as fotos carregadas |
@@ -750,6 +750,8 @@ Todas as estatísticas são sensíveis ao usuário no modo multiusuário — cad
 | `Shift+Click` | Seleciona em intervalo as fotos entre a última selecionada e a clicada |
 | `Double-click` | Abre a foto |
 | `?` | Mostra a referência de atalhos de teclado (funciona em todas as páginas) |
+
+A foto atual — aquela sobre a qual agem os atalhos de avaliação, favorito e rejeição — é marcada com um contorno de 4px em volta do seu cartão; todos os outros cartões passam a 50% de opacidade. Nada fica marcado até o cursor se mover de fato para uma foto dos resultados, por isso uma galeria que você ainda não percorreu permanece em intensidade total. Clicar numa foto move o marcador para ela, de modo que um atalho digitado logo após um clique se aplica à foto clicada, não àquela onde as setas o tinham deixado.
 
 ## Desfazer
 
