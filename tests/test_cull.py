@@ -449,6 +449,68 @@ class TestCullApplyFilterScope:
         assert not os.path.exists(str(tmp_path / "k"))
 
 
+class TestCullApplyFilterScopeIsBounded:
+    """The ``filters`` branch must be bounded, like the sidecar export branch.
+
+    ``_selected_paths`` was called here with no cap at all, so a whole-library
+    filter set resolved to every path the library holds on an endpoint that
+    moves and trashes files. Mirrors
+    ``tests.test_export.TestExportSidecarsFilterScopeIsBounded``, with its own
+    cap constant (``_CULL_FILTER_MAX``) rather than reusing the sidecar one:
+    the per-photo cost that justifies a cap differs (cull does one
+    ``shutil.move``/``copy2`` or ``send2trash`` call per photo rather than two
+    ``exiftool`` subprocesses), even though both caps are 10000 today.
+    """
+
+    def test_the_cap_matches_the_explicit_path_limit(self):
+        """Both request forms bound the same work, so both bound it the same."""
+        from api.routers.export import CullApplyRequest, _CULL_FILTER_MAX
+
+        paths_max = CullApplyRequest.model_fields["paths"].metadata[0].max_length
+        assert _CULL_FILTER_MAX == paths_max == 10000
+
+    def test_a_view_over_the_cap_is_refused_even_as_a_dry_run(self, client, tmp_path):
+        paths = [_make_file(tmp_path, f"cap{i}.jpg") for i in range(3)]
+        db = TestCullApplyFilterScope._categorised_db(
+            tmp_path, [(p, "capped") for p in paths]
+        )
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+            mock.patch(f"{_EXPORT_MODULE}._CULL_FILTER_MAX", 2),
+        ):
+            # dry_run True (the endpoint's own default) so an over-cap preview
+            # cannot be used to do the unbounded work the real run is refused for.
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"category": "capped"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 412, resp.text
+        detail = resp.json()["detail"]
+        # Names the count AND the limit: "too many" alone leaves the user with
+        # no idea how far to narrow.
+        assert "3" in detail and "2" in detail
+        # Refused before any I/O, dry-run or not.
+        assert not os.path.exists(str(tmp_path / "k"))
+
+    def test_a_view_at_the_cap_still_proceeds(self, client, tmp_path):
+        paths = [_make_file(tmp_path, f"cap{i}.jpg") for i in range(2)]
+        db = TestCullApplyFilterScope._categorised_db(
+            tmp_path, [(p, "capped") for p in paths]
+        )
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+            mock.patch(f"{_EXPORT_MODULE}._CULL_FILTER_MAX", 2),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"category": "capped"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 200, resp.text
+        assert sorted(resp.json()["would_copy"]) == sorted(paths)
+
+
 class TestCullApplyTargetIsExactlyOne:
     """``paths`` and ``filters`` name the same set two ways; never both.
 

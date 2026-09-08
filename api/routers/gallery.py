@@ -7,7 +7,7 @@ import asyncio
 import logging
 import math
 import sqlite3
-from typing import Optional
+from typing import NoReturn, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
@@ -859,6 +859,24 @@ def _resolve_order_by(params: dict) -> str:
     return f"{sort_col} {sort_dir}, path ASC"
 
 
+def _raise_422_for_invalid_gallery_params(exc: ValidationError, log: logging.Logger,
+                                          message: str) -> NoReturn:
+    """Log then re-raise a gallery-params ``ValidationError`` as the 422 clients get.
+
+    Every endpoint that resolves a raw query/filter dict through
+    ``_prepare_gallery_params`` or ``gallery_scope_sql`` (in this module,
+    ``api/routers/export.py`` and ``api/routers/faces.py``) caught this
+    exception with an identical body -- warn server-side with the structured
+    Pydantic detail (``loc``/``type``/``ctx``/``url``), then answer with a clean
+    422 that does not leak that detail to the client. ``log`` stays the
+    CALLER's own module logger, and ``message`` its own distinct log text, so
+    extracting the shared shape does not also collapse where a failure is
+    reported from or what it says.
+    """
+    log.warning(message, exc.errors())
+    raise HTTPException(status_code=422, detail="Invalid gallery parameters") from exc
+
+
 # Cap on paths returned by the percentile selection so a huge unfiltered view
 # can't try to select 100k photos client-side; the UI warns when truncated.
 _SELECT_BOTTOM_MAX = 5000
@@ -889,8 +907,7 @@ async def api_select_bottom_percent(
     try:
         _, params = _prepare_gallery_params(qp)
     except ValidationError as e:
-        logger.warning("Selection parameter validation failed: %s", e.errors())
-        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+        _raise_422_for_invalid_gallery_params(e, logger, "Selection parameter validation failed: %s")
 
     order_by_clause = _resolve_order_by(params)
     try:
@@ -962,8 +979,7 @@ async def api_photos_count(
                 conn, where_str, all_params, from_clause=from_clause
             )
     except ValidationError as e:
-        logger.warning("Gallery count parameter validation failed: %s", e.errors())
-        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+        _raise_422_for_invalid_gallery_params(e, logger, "Gallery count parameter validation failed: %s")
     except sqlite3.Error:
         logger.exception("Failed to count the gallery view")
         raise HTTPException(status_code=500, detail='Internal server error')
@@ -996,8 +1012,7 @@ async def api_photos_paths(
             await cur.close()
             paths = [r['path'] for r in rows]
     except ValidationError as e:
-        logger.warning("Gallery paths parameter validation failed: %s", e.errors())
-        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+        _raise_422_for_invalid_gallery_params(e, logger, "Gallery paths parameter validation failed: %s")
     except sqlite3.Error:
         logger.exception("Failed to list the gallery view's paths")
         raise HTTPException(status_code=500, detail='Internal server error')
@@ -1025,10 +1040,7 @@ async def api_photos(
     try:
         gallery_params, params = _prepare_gallery_params(qp)
     except ValidationError as e:
-        # Log the structured detail server-side; return a clean message rather
-        # than leaking Pydantic internals (loc/type/ctx/url) to the client.
-        logger.warning("Gallery parameter validation failed: %s", e.errors())
-        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+        _raise_422_for_invalid_gallery_params(e, logger, "Gallery parameter validation failed: %s")
     page = max(1, gallery_params.page)
     per_page = gallery_params.per_page
 

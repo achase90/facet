@@ -63,6 +63,22 @@ _PATH_QUERY_CHUNK = 500
 # selection the user believed was whole is worse than a clear refusal.
 _SIDECAR_FILTER_MAX = 10000
 
+# Same shape of problem, for POST /api/cull/apply's filter branch: `_selected_paths`
+# was called with no cap there at all, so a whole-library filter set resolved to
+# every path the library holds. Kept as its OWN constant rather than reusing
+# _SIDECAR_FILTER_MAX, even though both are 10000 today: that value is shared
+# only because both this field and ExportSidecarsRequest.paths cap their
+# explicit-list branch at max_length=10000 via the common _PathsOrFiltersRequest
+# base, so all four ways of naming a set on either endpoint end up bounded
+# identically. The per-photo COST that motivates a cap is not the same one --
+# sidecar export spawns two exiftool subprocesses per photo (~0.13s measured);
+# cull does a single shutil.move/copy2 or send2trash call per photo, an order of
+# magnitude cheaper -- so a future retune of either ceiling should not have to
+# touch the other. Refused (412) rather than truncated, exactly like the sidecar
+# cap, and applies to a dry run too: a preview must not be usable to do the
+# unbounded work the real run would be refused for.
+_CULL_FILTER_MAX = 10000
+
 
 # --- Request models ---
 
@@ -169,7 +185,8 @@ def _fetch_rating_rows(conn, paths, user_id):
     return {row["path"]: dict(row) for row in rows}
 
 
-def _resolve_filter_paths(conn, filters, user_id, exclude=None, max_paths=None):
+def _resolve_filter_paths(conn, filters, user_id, exclude=None, max_paths=None,
+                          filter_label="this action"):
     """Resolve a gallery filter set to a list of photo paths.
 
     ``gallery_scope_sql`` is the gallery's own definition of "the current
@@ -183,6 +200,8 @@ def _resolve_filter_paths(conn, filters, user_id, exclude=None, max_paths=None):
     ``max_paths`` bounds the resolved set. The count is a ``COUNT(*)`` over the
     same scope, taken BEFORE the path list is materialised, so an oversized
     view is refused without ever building the list it would have exported.
+    ``filter_label`` names the caller in the 412 (e.g. "sidecar export", "cull")
+    since this resolver is shared by more than one capped endpoint.
     """
     from api.routers.gallery import gallery_scope_sql
 
@@ -195,8 +214,8 @@ def _resolve_filter_paths(conn, filters, user_id, exclude=None, max_paths=None):
             raise HTTPException(
                 status_code=412,
                 detail=(
-                    f"This view holds {total} photos and sidecar export is capped at "
-                    f"{max_paths}. Narrow the filters and export again."
+                    f"This view holds {total} photos and {filter_label} is capped at "
+                    f"{max_paths}. Narrow the filters and try again."
                 ),
             )
     rows = conn.execute(
@@ -205,7 +224,7 @@ def _resolve_filter_paths(conn, filters, user_id, exclude=None, max_paths=None):
     return [row["path"] for row in rows]
 
 
-def _selected_paths(conn, body, user_id, max_filter_paths=None):
+def _selected_paths(conn, body, user_id, max_filter_paths=None, filter_label="this action"):
     """The paths a ``paths``-or-``filters`` request acts on.
 
     Explicit paths win; otherwise the filter set is resolved through the
@@ -216,16 +235,17 @@ def _selected_paths(conn, body, user_id, max_filter_paths=None):
     case rather than a silent preference.
 
     ``max_filter_paths`` bounds the FILTER branch only; the ``paths`` branch is
-    already bounded by the field's own ``max_length``.
+    already bounded by the field's own ``max_length``. ``filter_label`` is
+    forwarded to :func:`_resolve_filter_paths` for its 412 message.
     """
     if body.paths:
         return body.paths
     try:
         return _resolve_filter_paths(conn, body.filters, user_id, body.exclude,
-                                     max_paths=max_filter_paths)
+                                     max_paths=max_filter_paths, filter_label=filter_label)
     except ValidationError as e:
-        logger.warning("Export filter validation failed: %s", e.errors())
-        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+        from api.routers.gallery import _raise_422_for_invalid_gallery_params
+        _raise_422_for_invalid_gallery_params(e, logger, "Export filter validation failed: %s")
 
 
 def _fetch_regions_map(conn, paths):
@@ -754,7 +774,8 @@ def api_export_sidecars(
 
     user_id = user.user_id
     with get_db() as conn:
-        paths = _selected_paths(conn, body, user_id, max_filter_paths=_SIDECAR_FILTER_MAX)
+        paths = _selected_paths(conn, body, user_id, max_filter_paths=_SIDECAR_FILTER_MAX,
+                                 filter_label="sidecar export")
         return _write_sidecars_for_paths(conn, paths, user_id, body.overwrite)
 
 
@@ -791,6 +812,11 @@ def api_cull_apply(
     frame re-picks a surviving sibling as the new lead so the set stays
     visible under the default hide toggles.
     """
+    # Kept unchanged above: FastAPI publishes this docstring as the operation
+    # description, and the generated client types (client/src/app/core/api/
+    # schema.d.ts) are diffed in CI, so prose here is a cross-project change.
+    # Both ways of naming the set are bounded at _CULL_FILTER_MAX; a larger
+    # filter set is refused with 412 rather than truncated, dry run included.
     if not body.paths and body.filters is None:
         raise HTTPException(status_code=400, detail="Either paths or filters is required")
 
@@ -799,7 +825,8 @@ def api_cull_apply(
     # rejects are rejected. Photos in the selection that don't match are skipped.
     want_rejected = body.action != "copy_keeps"
     with get_db() as conn:
-        paths = _selected_paths(conn, body, user_id)
+        paths = _selected_paths(conn, body, user_id, max_filter_paths=_CULL_FILTER_MAX,
+                                 filter_label="cull")
         state = _reject_state_map(conn, paths, user_id)
         matching = [p for p in paths if state.get(p) == want_rejected]
         group_keys = _sequence_group_keys(conn, matching, user_id)

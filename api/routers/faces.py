@@ -612,15 +612,14 @@ def _batch_scope_sql(conn, body, user):
     GET answers. That check used to live at the read call sites only, and this
     write path reached straight past it.
     """
-    from api.routers.gallery import gallery_scope_sql
+    from api.routers.gallery import gallery_scope_sql, _raise_422_for_invalid_gallery_params
 
     try:
         return gallery_scope_sql(
             conn, body.filters, user.user_id if user else None, body.exclude
         )
     except ValidationError as ex:
-        logger.warning("Batch filter validation failed: %s", ex.errors())
-        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from ex
+        _raise_422_for_invalid_gallery_params(ex, logger, "Batch filter validation failed: %s")
 
 
 @retry_on_locked()
