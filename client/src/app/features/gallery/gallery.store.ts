@@ -281,7 +281,7 @@ export class GalleryStore {
   private lastSelectedIndex = -1;
 
   readonly selectionCount = computed(() =>
-    this.selectionScope() === 'view'
+    this.viewScopeSelected()
       ? Math.max(0, this.total() - this.excludedPaths().size)
       : this.selectedPaths().size,
   );
@@ -305,7 +305,7 @@ export class GalleryStore {
 
   /** The loaded photos the selection covers, in grid order — either scope. */
   readonly selectedLoadedPaths = computed(() => {
-    if (this.selectionScope() === 'view') {
+    if (this.viewScopeSelected()) {
       const excluded = this.excludedPaths();
       return this.photos().filter(p => !excluded.has(p.path)).map(p => p.path);
     }
@@ -322,7 +322,7 @@ export class GalleryStore {
   toggleSelection(photo: Photo, event?: MouseEvent): void {
     const photos = this.photos();
     const clickedIndex = photos.findIndex(p => p.path === photo.path);
-    const target = this.selectionScope() === 'view' ? this.excludedPaths : this.selectedPaths;
+    const target = this.viewScopeSelected() ? this.excludedPaths : this.selectedPaths;
     const next = new Set(target());
 
     if (event?.shiftKey && this.lastSelectedIndex >= 0 && clickedIndex >= 0) {
@@ -353,7 +353,7 @@ export class GalleryStore {
   selectAll(): void {
     // Already view-scoped: "select all" can only mean re-ticking whatever was
     // unticked. Falling through would DESELECT the view down to the loaded page.
-    const meansEverything = this.selectionScope() === 'view' || this.selectionCount() === 0;
+    const meansEverything = this.viewScopeSelected() || this.selectionCount() === 0;
     if (meansEverything && this.canScopeSelectionToView()) {
       this.selectWholeView();
       return;
@@ -391,7 +391,7 @@ export class GalleryStore {
    *   the user never looked at.
    */
   invertSelection(): void {
-    if (this.selectionScope() === 'view') {
+    if (this.viewScopeSelected()) {
       const excluded = this.excludedPaths();
       this.selectionScope.set('paths');
       this.excludedPaths.set(new Set());
@@ -428,7 +428,7 @@ export class GalleryStore {
    * since appending a page does not change what the view is.
    */
   private resetViewScope(): void {
-    if (this.selectionScope() !== 'view') return;
+    if (!this.viewScopeSelected()) return;
     this.selectedPaths.set(new Set());
     this.excludedPaths.set(new Set());
     this.selectionScope.set('paths');
@@ -1110,7 +1110,7 @@ export class GalleryStore {
    * server derives the rows — no path list on the wire, and no cap.
    */
   private batchTarget(paths: string[]): Record<string, unknown> {
-    const filters = this.selectionScope() === 'view' ? this.filterPayload() : null;
+    const filters = this.viewScopeSelected() ? this.filterPayload() : null;
     if (!filters) return { photo_paths: paths };
     return { filters, exclude: [...this.excludedPaths()] };
   }
@@ -1130,8 +1130,8 @@ export class GalleryStore {
     patch: Partial<Photo>,
     extraBody: Record<string, unknown> = {},
   ): Promise<BatchResult | null> {
-    const targeted = this.selectionScope() === 'view' ? this.selectionCount() : paths.length;
-    const loaded = this.selectionScope() === 'view' ? this.selectedLoadedPaths() : paths;
+    const targeted = this.viewScopeSelected() ? this.selectionCount() : paths.length;
+    const loaded = this.viewScopeSelected() ? this.selectedLoadedPaths() : paths;
     const snapshot = this.snapshotFlags(loaded);
     this.patchPhotos(new Set(loaded), patch);
     try {
