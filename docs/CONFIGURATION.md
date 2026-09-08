@@ -2357,7 +2357,7 @@ Any endpoint that copies, symlinks, or moves photo files out of the library — 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `allowed_target_dirs` | *(key absent)* | Extra root directories a copy/symlink export or a cull-to-folder copy/move may write into, on top of the scan directories (always allowed). **Absent by default** — out of the box, the only writable export destinations are your configured scan directories |
-| `cull.allow_trash` | `false` | Whether cull-to-folder's `trash_rejects` action may send files to the OS trash (recoverable, via `send2trash`) instead of only supporting `copy_keeps`/`move_rejects`. Off by default; `trash_rejects` 403s until enabled |
+| `cull.allow_trash` | `false` | Whether cull-to-folder's `trash_rejects` action may send files to the OS trash (recoverable, via `send2trash`, a base dependency shipped in the Docker image, so the action works once enabled) instead of only supporting `copy_keeps`/`move_rejects`. Off by default; the viewer hides the "Trash rejects" option rather than offering one that would 403 |
 
 **Multi-frame sets and bulk actions.** `hide_brackets` / `hide_panoramas` (see [Web Viewer — Default Filters](VIEWER.md#default-filters), both `true` by default) bound what any *selection-based* bulk action can reach, including cull-to-folder and album export from a selection: with a set collapsed to its representative frame, acting on the selection acts on that one frame, not the rest of the set by default. Cull-to-folder's own `include_sequence_siblings` opt-in widens a matched photo to its whole set regardless of the selection; see [Web Viewer — Cull to folder § Multi-frame sets](VIEWER.md#cull-to-folder) for that and the other escape hatches.
 

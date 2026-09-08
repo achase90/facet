@@ -7,14 +7,16 @@ import asyncio
 import logging
 import math
 import sqlite3
-from typing import Optional
+from typing import NoReturn, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from api.auth import CurrentUser, get_optional_user
-from api.config import VIEWER_CONFIG, _FULL_CONFIG
+from api.config import VIEWER_CONFIG, _FULL_CONFIG, cull_allow_trash
 from api.database import get_async_db, get_db
-from api.models.gallery import GalleryParams, Photo, PhotosResponse
+from api.models.gallery import (
+    GalleryParams, Photo, PhotoCountResponse, PhotoPathsResponse, PhotosResponse,
+)
 from api.models.discovery import PhotoSetResponse, PhotoTypeCountsResponse, ViewerConfigResponse
 from api.db_helpers import (
     get_existing_columns, get_cached_count_async,
@@ -34,6 +36,12 @@ from api.types import (
 )
 from utils.histogram import unpack_histogram
 from utils.sequence import BRACKET as BRACKET_KIND
+
+try:
+    import send2trash  # noqa: F401
+    HAS_SEND2TRASH = True
+except ImportError:
+    HAS_SEND2TRASH = False
 
 router = APIRouter(tags=["gallery"])
 logger = logging.getLogger(__name__)
@@ -549,6 +557,103 @@ def _build_gallery_where(params, conn=None, user_id=None):
     return where_clauses, sql_params
 
 
+def _scoped_album_id(filters):
+    """The album id a filter set scopes to, or ``None`` if it scopes to none.
+
+    Read off the RAW filter dict rather than the prepared params so the access
+    check runs before :func:`_prepare_gallery_params` can reject the set for an
+    unrelated reason — an unknown album must answer 404 whatever else the query
+    string carries. The two are the same value in practice: ``album_id`` is a
+    plain ``str`` field on ``GalleryParams`` and ``normalize_params`` does not
+    touch it, so preparation passes it through unchanged.
+    """
+    _, album_params = album_filter_clause((filters or {}).get('album_id'))
+    return album_params[0] if album_params else None
+
+
+def _gallery_scope_sql_checked(conn, filters, user_id, exclude, prepared):
+    """The scope tuple, with the album access check ALREADY performed.
+
+    Private on purpose: the two public entry points below each run the access
+    check for their own connection flavour, so no caller outside this module
+    can reach the builder without it. ``prepared`` is the params dict
+    :func:`_prepare_gallery_params` returns, passed in by a caller that has
+    already prepared the same input (the listing and percentile endpoints need
+    it for their sort and paging), so one request prepares once.
+    """
+    if prepared is None:
+        _, prepared = _prepare_gallery_params(dict(filters or {}))
+    from_clause, from_params = get_photos_from_clause(user_id)
+    where_clauses, sql_params = _build_gallery_where(prepared, conn, user_id=user_id)
+    all_params = list(from_params) + list(sql_params)
+    if exclude:
+        placeholders = ','.join('?' * len(exclude))
+        where_clauses.append(f"photos.path NOT IN ({placeholders})")
+        all_params.extend(exclude)
+    where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    return from_clause, where_str, all_params
+
+
+def gallery_scope_sql(conn, filters, user_id, exclude=None, prepared=None):
+    """``(from_clause, where_str, params)`` for the rows one gallery view shows.
+
+    The single definition of "the current view" for every surface that acts on
+    a whole filter set instead of a page of it — the count/paths endpoints, the
+    filter-scoped batch writes, cull and sidecar export. The filter dict goes
+    through :func:`_prepare_gallery_params` first, exactly like the listing
+    endpoint: it merges the viewer defaults and expands the ``TYPE_FILTERS``
+    presets, so a filter set that renders one gallery cannot resolve to a
+    different row set for a mutation. Skipping that step is what the cull and
+    export paths used to do.
+
+    An album-scoped filter set is access-checked HERE rather than at each call
+    site, because three of them are POST bodies: a request carrying
+    ``filters: {"album_id": N}`` reached an album whose GET answers 403/404 on
+    the filter-scoped cull, sidecar export and batch writes, all of which
+    skipped the check the read paths performed. Building the scope and
+    authorizing it are now one step, so a fourth caller cannot omit it.
+
+    ``exclude`` removes named paths from the scope, which is how the client's
+    "whole view selected, minus these few" state reaches the server without
+    sending the whole selection.
+
+    ``where_str`` carries its own leading ``" WHERE "`` and is never empty: the
+    visibility clause is unconditional (``1=1`` outside multi-user mode), so
+    callers can concatenate it straight after the FROM clause — including
+    inside an ``INSERT ... SELECT``, whose upsert clause needs a WHERE to parse
+    unambiguously.
+
+    Every user value stays a ``?`` bind param; only the fixed ``from_clause``
+    and the generated placeholder run are interpolated. Raises
+    ``ValidationError`` for a malformed filter set, which callers translate to
+    422.
+
+    ``conn`` must be a synchronous ``sqlite3`` connection. Use
+    :func:`gallery_scope_sql_async` on an aiosqlite one.
+    """
+    album_id = _scoped_album_id(filters)
+    if album_id is not None:
+        from api.routers.albums import _check_album_access
+        _check_album_access(conn, album_id, user_id)
+    return _gallery_scope_sql_checked(conn, filters, user_id, exclude, prepared)
+
+
+async def gallery_scope_sql_async(conn, filters, user_id, exclude=None, prepared=None):
+    """:func:`gallery_scope_sql` for an aiosqlite connection.
+
+    Two entry points rather than one, because the album access check is the
+    only part of the scope that queries the database and aiosqlite's
+    ``execute`` returns an awaitable ``Result`` with no ``fetchone`` — the sync
+    check cannot run on this connection at all. Everything after the check is
+    the shared, connection-agnostic builder, so the two cannot drift.
+    """
+    album_id = _scoped_album_id(filters)
+    if album_id is not None:
+        from api.routers.albums import _check_album_access_async
+        await _check_album_access_async(conn, album_id, user_id)
+    return _gallery_scope_sql_checked(conn, filters, user_id, exclude, prepared)
+
+
 @router.get("/api/photo", response_model=Photo, response_model_exclude_unset=True)
 async def api_photo(
     path: str = Query(...),
@@ -754,6 +859,24 @@ def _resolve_order_by(params: dict) -> str:
     return f"{sort_col} {sort_dir}, path ASC"
 
 
+def _raise_422_for_invalid_gallery_params(exc: ValidationError, log: logging.Logger,
+                                          message: str) -> NoReturn:
+    """Log then re-raise a gallery-params ``ValidationError`` as the 422 clients get.
+
+    Every endpoint that resolves a raw query/filter dict through
+    ``_prepare_gallery_params`` or ``gallery_scope_sql`` (in this module,
+    ``api/routers/export.py`` and ``api/routers/faces.py``) caught this
+    exception with an identical body -- warn server-side with the structured
+    Pydantic detail (``loc``/``type``/``ctx``/``url``), then answer with a clean
+    422 that does not leak that detail to the client. ``log`` stays the
+    CALLER's own module logger, and ``message`` its own distinct log text, so
+    extracting the shared shape does not also collapse where a failure is
+    reported from or what it says.
+    """
+    log.warning(message, exc.errors())
+    raise HTTPException(status_code=422, detail="Invalid gallery parameters") from exc
+
+
 # Cap on paths returned by the percentile selection so a huge unfiltered view
 # can't try to select 100k photos client-side; the UI warns when truncated.
 _SELECT_BOTTOM_MAX = 5000
@@ -784,21 +907,15 @@ async def api_select_bottom_percent(
     try:
         _, params = _prepare_gallery_params(qp)
     except ValidationError as e:
-        logger.warning("Selection parameter validation failed: %s", e.errors())
-        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+        _raise_422_for_invalid_gallery_params(e, logger, "Selection parameter validation failed: %s")
 
     order_by_clause = _resolve_order_by(params)
     try:
         async with get_async_db() as conn:
             user_id = user.user_id if user else None
-            _, album_params = album_filter_clause(params.get('album_id'))
-            if album_params:
-                from api.routers.albums import _check_album_access_async
-                await _check_album_access_async(conn, album_params[0], user_id)
-            from_clause, from_params = get_photos_from_clause(user_id)
-            where_clauses, sql_params = _build_gallery_where(params, conn, user_id=user_id)
-            all_params = from_params + sql_params
-            where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            from_clause, where_str, all_params = await gallery_scope_sql_async(
+                conn, qp, user_id, prepared=params
+            )
 
             total = await get_cached_count_async(
                 conn, where_str, all_params, from_clause=from_clause
@@ -839,6 +956,69 @@ async def api_select_bottom_percent(
     }
 
 
+@router.get("/api/photos/count", response_model=PhotoCountResponse,
+            response_model_exclude_unset=True)
+async def api_photos_count(
+    request: Request,
+    user: Optional[CurrentUser] = Depends(get_optional_user),
+):
+    """How many photos the current gallery view holds, across every page.
+
+    The gallery paginates at ``pagination.default_per_page`` with infinite
+    scroll, so "select all" could only ever mean "select what has been
+    fetched". This answers for the whole view from the same filters the grid
+    renders, so the client can hold a virtual whole-view selection instead of a
+    path list.
+    """
+    qp = dict(request.query_params)
+    try:
+        async with get_async_db() as conn:
+            user_id = user.user_id if user else None
+            from_clause, where_str, all_params = await gallery_scope_sql_async(conn, qp, user_id)
+            total = await get_cached_count_async(
+                conn, where_str, all_params, from_clause=from_clause
+            )
+    except ValidationError as e:
+        _raise_422_for_invalid_gallery_params(e, logger, "Gallery count parameter validation failed: %s")
+    except sqlite3.Error:
+        logger.exception("Failed to count the gallery view")
+        raise HTTPException(status_code=500, detail='Internal server error')
+    return {"total": total}
+
+
+@router.get("/api/photos/paths", response_model=PhotoPathsResponse,
+            response_model_exclude_unset=True)
+async def api_photos_paths(
+    request: Request,
+    user: Optional[CurrentUser] = Depends(get_optional_user),
+):
+    """Every path in the current gallery view, for a whole-view selection.
+
+    Uncapped and unordered: the client builds a Set from these, so an ORDER BY
+    would sort the entire view for nothing (and would drag in the
+    ``top_picks_score`` SELECT alias that the ranked percentile selection
+    needs). ``total`` is ``len(paths)``, never a cached count, so the two
+    halves of the payload cannot disagree.
+    """
+    qp = dict(request.query_params)
+    try:
+        async with get_async_db() as conn:
+            user_id = user.user_id if user else None
+            from_clause, where_str, all_params = await gallery_scope_sql_async(conn, qp, user_id)
+            cur = await conn.execute(
+                f"SELECT photos.path FROM {from_clause}{where_str}", all_params
+            )
+            rows = await cur.fetchall()
+            await cur.close()
+            paths = [r['path'] for r in rows]
+    except ValidationError as e:
+        _raise_422_for_invalid_gallery_params(e, logger, "Gallery paths parameter validation failed: %s")
+    except sqlite3.Error:
+        logger.exception("Failed to list the gallery view's paths")
+        raise HTTPException(status_code=500, detail='Internal server error')
+    return {"total": len(paths), "paths": paths}
+
+
 @router.get("/api/photos", response_model=PhotosResponse,
             response_model_exclude_unset=True)
 async def api_photos(
@@ -860,10 +1040,7 @@ async def api_photos(
     try:
         gallery_params, params = _prepare_gallery_params(qp)
     except ValidationError as e:
-        # Log the structured detail server-side; return a clean message rather
-        # than leaking Pydantic internals (loc/type/ctx/url) to the client.
-        logger.warning("Gallery parameter validation failed: %s", e.errors())
-        raise HTTPException(status_code=422, detail="Invalid gallery parameters") from e
+        _raise_422_for_invalid_gallery_params(e, logger, "Gallery parameter validation failed: %s")
     page = max(1, gallery_params.page)
     per_page = gallery_params.per_page
 
@@ -873,14 +1050,13 @@ async def api_photos(
     try:
         async with get_async_db() as conn:
             user_id = user.user_id if user else None
-            _, album_params = album_filter_clause(params.get('album_id'))
-            if album_params:
-                from api.routers.albums import _check_album_access_async
-                await _check_album_access_async(conn, album_params[0], user_id)
-            from_clause, from_params = get_photos_from_clause(user_id)
-            where_clauses, sql_params = _build_gallery_where(params, conn, user_id=user_id)
-            all_params = from_params + sql_params
-            where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            # The listing's own scope, from the same builder every whole-view
+            # surface uses -- album access check included. `params` is already
+            # prepared above for the sort and paging, so it is handed over
+            # rather than prepared again.
+            from_clause, where_str, all_params = await gallery_scope_sql_async(
+                conn, qp, user_id, prepared=params
+            )
 
             total_count = await get_cached_count_async(conn, where_str, all_params, from_clause=from_clause)
             total_pages, offset = paginate(total_count, page, per_page)
@@ -891,6 +1067,7 @@ async def api_photos(
                           'hide_panoramas', 'no_blink', 'burst_only')
             )
             if any_hide_active:
+                _, from_params = get_photos_from_clause(user_id)
                 params_no_hide = dict(params)
                 for k in ('hide_blinks', 'hide_bursts', 'hide_duplicates', 'hide_brackets',
                           'hide_panoramas', 'no_blink', 'burst_only'):
@@ -1424,6 +1601,30 @@ def _social_export_presets() -> dict:
     return {'presets': presets}
 
 
+def _cull_capabilities() -> dict:
+    """Whether the ``trash_rejects`` action on ``/api/cull/apply`` can succeed.
+
+    Mirrors that endpoint's own two-part refusal (``export.py``): a 403 when
+    ``viewer.cull.allow_trash`` is off, a 400 when the ``send2trash`` package
+    is missing. ``allow_trash`` goes through the shared
+    ``api.config.cull_allow_trash`` helper -- the same one ``export.py``
+    calls before it acts -- so both readers coerce the raw config value with
+    the same Python-truthiness rule and can never disagree about whether
+    trashing is enabled, however the operator wrote the value.
+
+    ``send2trash``'s importability is read from the module-scope
+    ``HAS_SEND2TRASH`` constant (set once, at import time, the same idiom
+    ``db.connection`` uses for ``HAS_SQLITE_VEC``) rather than probed here.
+    That constant is fixed for the life of the process: a ``pip install
+    send2trash`` into a running venv is not reflected until the server
+    restarts, so ``trash_available`` can keep reporting ``false`` right
+    after an operator installs the package -- see the restart guidance on
+    ``export.py``'s matching 400 detail.
+    """
+    allow_trash = cull_allow_trash(VIEWER_CONFIG)
+    return {'allow_trash': allow_trash, 'trash_available': allow_trash and HAS_SEND2TRASH}
+
+
 def _render_migration_status():
     """How many RAW rows still carry a thumbnail from the old render profile.
 
@@ -1490,6 +1691,7 @@ def api_config(user: Optional[CurrentUser] = Depends(get_optional_user)):
         'quality_thresholds': VIEWER_CONFIG['quality_thresholds'],
         'social_export': _social_export_presets(),
         'cull_styles': get_cull_styles(),
+        'cull': _cull_capabilities(),
         'moment_confidence_min': VIEWER_CONFIG.get('moment_confidence_min', 0),
         'notification_duration_ms': VIEWER_CONFIG.get('notification_duration_ms', 2000),
         'translation_target_language': _FULL_CONFIG.get('translation', {}).get('target_language', ''),

@@ -7,9 +7,12 @@ import logging
 import os
 import sqlite3
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from api.auth import CurrentUser, require_edition, require_auth
 from api.config import is_multi_user_enabled, _stats_cache
@@ -57,11 +60,32 @@ class TogglePhotoRequest(BaseModel):
 
 
 class BatchPhotoRequest(BaseModel):
-    photo_paths: list[str] = Field(max_length=1000)
+    """The set a batch write acts on: named paths, or the gallery view itself.
+
+    The gallery paginates at ``pagination.default_per_page`` with infinite
+    scroll, so a path list could only ever name the pages the client had
+    fetched. ``filters`` is the same query string the grid renders and the
+    server derives the rows from it, so a whole-view write puts no path list on
+    the wire at all; ``exclude`` carries the handful the user unticked.
+
+    Exactly one of the two: neither is a write with no target and no way to say
+    so, and both would leave which one wins undefined.
+    """
+
+    photo_paths: Optional[list[str]] = Field(default=None, max_length=1000)
+    filters: Optional[dict] = None
+    # Bounded well below SQLITE_MAX_VARIABLE_NUMBER: each exclusion binds one
+    # placeholder into a single NOT IN (...) alongside the filter's own binds.
+    exclude: Optional[list[str]] = Field(default=None, max_length=1000)
+
+    @model_validator(mode='after')
+    def _exactly_one_target(self):
+        if (self.photo_paths is None) == (self.filters is None):
+            raise ValueError("exactly one of photo_paths or filters is required")
+        return self
 
 
-class BatchRatingRequest(BaseModel):
-    photo_paths: list[str] = Field(max_length=1000)
+class BatchRatingRequest(BatchPhotoRequest):
     rating: int = Field(ge=0, le=5)
 
 
@@ -574,48 +598,132 @@ def api_clear_junk(
             raise HTTPException(status_code=500, detail='Internal server error')
 
 
+def _batch_scope_sql(conn, body, user):
+    """The gallery scope a filter-scoped batch write acts on.
+
+    Imported inline, like the other cross-router helpers here, so this module
+    keeps no import-time dependency on the gallery router.
+
+    The scope carries the visibility clause as its FIRST where clause, which is
+    why the filter branch needs no :func:`_writable_photo_paths` pass: a row
+    another tenant owns is not in the set at all, rather than filtered out of a
+    list after the fact.
+
+    It also carries the album access check, so ``filters: {"album_id": N}``
+    naming an album this caller cannot open raises the same 403/404 the gallery
+    GET answers. That check used to live at the read call sites only, and this
+    write path reached straight past it.
+    """
+    from api.routers.gallery import gallery_scope_sql, _raise_422_for_invalid_gallery_params
+
+    try:
+        return gallery_scope_sql(
+            conn, body.filters, user.user_id if user else None, body.exclude
+        )
+    except ValidationError as ex:
+        _raise_422_for_invalid_gallery_params(ex, logger, "Batch filter validation failed: %s")
+
+
+@dataclass(frozen=True)
+class BatchWriteSql:
+    """The statements one batch endpoint needs, as a 2x2 matrix.
+
+    Two ways to name the target set -- an explicit ``photo_paths`` list or a
+    gallery ``filters`` set -- times two places the answer is stored: per-user
+    rows in ``user_preferences``, or the global columns on ``photos``. Each
+    cell needs its own statement because the four differ in shape, not only in
+    text: the path forms bind one row per path, the filter forms carry a
+    ``{scope}`` that takes the gallery's own FROM + WHERE, and the single-user
+    path form carries ``{placeholders}``.
+
+    Grouped into one object because they are one decision. As nine positional
+    arguments the caller had to remember which of them pair up, and adding a
+    fifth endpoint meant threading every one of them through again.
+    """
+
+    #: ``executemany``, one bind row per path, built by :attr:`multi_user_row`.
+    multi_user: str
+    multi_user_row: Callable[[str], tuple]
+    #: Carries ``{placeholders}`` -- one ``?`` per surviving path.
+    single_user: str
+    #: Both carry ``{scope}``: the gallery FROM + WHERE, so the set is written
+    #: without ever being materialised as a path list.
+    filter_multi_user: str
+    filter_single_user: str
+    #: Bind values that precede the paths/scope params. ``single_user_prefix``
+    #: is deliberately shared by BOTH single-user statements: they set the same
+    #: columns and differ only in how they name the rows to set them on.
+    single_user_prefix: tuple = ()
+    filter_multi_user_prefix: tuple = ()
+
+
+def _write_filter_scope(conn, body: BatchPhotoRequest, user: CurrentUser, sql: BatchWriteSql) -> int:
+    """Write every row the filter set matches, in one statement.
+
+    The set is never materialised as paths, so this holds however large the
+    view is, and the count is the ``rowcount`` the statement reports. The scope
+    already carries the visibility clause and the ``exclude`` list, so there is
+    no separate writability pass here.
+    """
+    from_clause, where_str, scope_params = _batch_scope_sql(conn, body, user)
+    scope = f"{from_clause}{where_str}"
+    if user.user_id and is_multi_user_enabled():
+        cursor = conn.execute(
+            sql.filter_multi_user.format(scope=scope),
+            [*sql.filter_multi_user_prefix, *scope_params],
+        )
+    else:
+        cursor = conn.execute(
+            sql.filter_single_user.format(scope=scope),
+            [*sql.single_user_prefix, *scope_params],
+        )
+    return cursor.rowcount
+
+
+def _write_paths(conn, paths: list, user: CurrentUser, sql: BatchWriteSql) -> int:
+    """Write the named paths, which the caller has already filtered."""
+    if user.user_id and is_multi_user_enabled():
+        conn.executemany(sql.multi_user, [sql.multi_user_row(path) for path in paths])
+    else:
+        placeholders = ','.join('?' * len(paths))
+        conn.execute(
+            sql.single_user.format(placeholders=placeholders),
+            [*sql.single_user_prefix, *paths],
+        )
+    return len(paths)
+
+
 @retry_on_locked()
-def _batch_update(
-    photo_paths: list[str],
-    user: CurrentUser,
-    multi_user_sql: str,
-    multi_user_row,
-    single_user_sql: str,
-    single_user_prefix: tuple = (),
-) -> dict:
+def _batch_update(body: BatchPhotoRequest, user: CurrentUser, sql: BatchWriteSql) -> dict:
     """Execute a batch update on photos with transaction and cache invalidation.
 
-    ``count`` is the number of photos actually written, not the number asked
-    for: :func:`_writable_photo_paths` drops the paths that do not exist or that
-    this caller may not see. Writing them was two defects at once — a stale path
-    made ``executemany`` raise a FOREIGN KEY ``IntegrityError`` that surfaced as
-    a 500 and lost the whole batch, and in multi-user mode nothing stopped a
-    caller creating ``user_preferences`` rows for photos outside her own
-    directories.
+    Which statement of :class:`BatchWriteSql` runs is decided here; the two
+    branches are :func:`_write_filter_scope` and :func:`_write_paths`.
 
-    ``multi_user_row`` builds one bind tuple per path and ``single_user_sql``
-    carries a ``{placeholders}`` field, because both have to be built from the
-    filtered list rather than from the request.
+    With ``photo_paths``, ``count`` is the number of photos actually written,
+    not the number asked for: :func:`_writable_photo_paths` drops the paths that
+    do not exist or that this caller may not see. Writing them was two defects
+    at once — a stale path made ``executemany`` raise a FOREIGN KEY
+    ``IntegrityError`` that surfaced as a 500 and lost the whole batch, and in
+    multi-user mode nothing stopped a caller creating ``user_preferences`` rows
+    for photos outside her own directories. An empty survivor list returns
+    before the commit, so a batch naming only unwritable paths is not a write.
     """
-    if not photo_paths:
+    if body.filters is None and not body.photo_paths:
         return {'success': True, 'count': 0}
 
     with get_db() as conn:
         try:
-            paths = _writable_photo_paths(conn, user, photo_paths)
-            if not paths:
-                return {'success': True, 'count': 0}
-            if user.user_id and is_multi_user_enabled():
-                conn.executemany(multi_user_sql, [multi_user_row(path) for path in paths])
+            if body.filters is not None:
+                count = _write_filter_scope(conn, body, user, sql)
             else:
-                placeholders = ','.join('?' * len(paths))
-                conn.execute(
-                    single_user_sql.format(placeholders=placeholders),
-                    [*single_user_prefix, *paths],
-                )
+                paths = _writable_photo_paths(conn, user, body.photo_paths)
+                if not paths:
+                    return {'success': True, 'count': 0}
+                count = _write_paths(conn, paths, user, sql)
             conn.commit()
             _stats_cache.clear()
-            return {'success': True, 'count': len(paths)}
+            return {'success': True, 'count': count}
         except HTTPException:
             raise
         except sqlite3.Error as ex:
@@ -632,16 +740,25 @@ def api_batch_favorite(
     user: CurrentUser = Depends(require_edition),
 ):
     """Mark multiple photos as favorite (clears rejected)."""
-    return _batch_update(
-        body.photo_paths, user,
-        multi_user_sql="""
+    return _batch_update(body, user, BatchWriteSql(
+        multi_user="""
             INSERT INTO user_preferences (user_id, photo_path, is_favorite, is_rejected)
             VALUES (?, ?, 1, 0)
             ON CONFLICT(user_id, photo_path) DO UPDATE SET is_favorite = 1, is_rejected = 0
         """,
         multi_user_row=lambda path: (user.user_id, path),
-        single_user_sql="UPDATE photos SET is_favorite = 1, is_rejected = 0 WHERE path IN ({placeholders})",
-    )
+        single_user="UPDATE photos SET is_favorite = 1, is_rejected = 0 WHERE path IN ({placeholders})",
+        filter_multi_user="""
+            INSERT INTO user_preferences (user_id, photo_path, is_favorite, is_rejected)
+            SELECT ?, photos.path, 1, 0 FROM {scope}
+            ON CONFLICT(user_id, photo_path) DO UPDATE SET is_favorite = 1, is_rejected = 0
+        """,
+        filter_multi_user_prefix=(user.user_id,),
+        filter_single_user=(
+            "UPDATE photos SET is_favorite = 1, is_rejected = 0 "
+            "WHERE path IN (SELECT photos.path FROM {scope})"
+        ),
+    ))
 
 
 @router.post("/api/photos/batch_reject")
@@ -650,16 +767,25 @@ def api_batch_reject(
     user: CurrentUser = Depends(require_edition),
 ):
     """Mark multiple photos as rejected (clears favorite and rating)."""
-    return _batch_update(
-        body.photo_paths, user,
-        multi_user_sql="""
+    return _batch_update(body, user, BatchWriteSql(
+        multi_user="""
             INSERT INTO user_preferences (user_id, photo_path, is_rejected, star_rating, is_favorite)
             VALUES (?, ?, 1, 0, 0)
             ON CONFLICT(user_id, photo_path) DO UPDATE SET is_rejected = 1, star_rating = 0, is_favorite = 0
         """,
         multi_user_row=lambda path: (user.user_id, path),
-        single_user_sql="UPDATE photos SET is_rejected = 1, star_rating = 0, is_favorite = 0 WHERE path IN ({placeholders})",
-    )
+        single_user="UPDATE photos SET is_rejected = 1, star_rating = 0, is_favorite = 0 WHERE path IN ({placeholders})",
+        filter_multi_user="""
+            INSERT INTO user_preferences (user_id, photo_path, is_rejected, star_rating, is_favorite)
+            SELECT ?, photos.path, 1, 0, 0 FROM {scope}
+            ON CONFLICT(user_id, photo_path) DO UPDATE SET is_rejected = 1, star_rating = 0, is_favorite = 0
+        """,
+        filter_multi_user_prefix=(user.user_id,),
+        filter_single_user=(
+            "UPDATE photos SET is_rejected = 1, star_rating = 0, is_favorite = 0 "
+            "WHERE path IN (SELECT photos.path FROM {scope})"
+        ),
+    ))
 
 
 @router.post("/api/photos/batch_rating")
@@ -668,14 +794,23 @@ def api_batch_rating(
     user: CurrentUser = Depends(require_edition),
 ):
     """Set star rating for multiple photos."""
-    return _batch_update(
-        body.photo_paths, user,
-        multi_user_sql="""
+    return _batch_update(body, user, BatchWriteSql(
+        multi_user="""
             INSERT INTO user_preferences (user_id, photo_path, star_rating)
             VALUES (?, ?, ?)
             ON CONFLICT(user_id, photo_path) DO UPDATE SET star_rating = excluded.star_rating
         """,
         multi_user_row=lambda path: (user.user_id, path, body.rating),
-        single_user_sql="UPDATE photos SET star_rating = ? WHERE path IN ({placeholders})",
+        single_user="UPDATE photos SET star_rating = ? WHERE path IN ({placeholders})",
         single_user_prefix=(body.rating,),
-    )
+        filter_multi_user="""
+            INSERT INTO user_preferences (user_id, photo_path, star_rating)
+            SELECT ?, photos.path, ? FROM {scope}
+            ON CONFLICT(user_id, photo_path) DO UPDATE SET star_rating = excluded.star_rating
+        """,
+        filter_multi_user_prefix=(user.user_id, body.rating),
+        filter_single_user=(
+            "UPDATE photos SET star_rating = ? "
+            "WHERE path IN (SELECT photos.path FROM {scope})"
+        ),
+    ))

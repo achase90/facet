@@ -69,6 +69,7 @@ dependencies = [
     "psutil>=5.9.0",
     "reverse_geocoder>=1.5.1",
     "jsonschema>=4.18.0",
+    "send2trash>=1.8.0",
 ]
 
 [project.optional-dependencies]
@@ -85,10 +86,6 @@ saliency = [
 gpu-clustering = [
     "cuml",
     "cupy",
-]
-cull = [
-    # OS-trash for the reject-to-trash cull action (viewer.cull.allow_trash).
-    "send2trash>=1.8.0",
 ]
 iqa-extended = [
     # Optional extended-IQA tier (scoring_config.json "iqa_extended"). Only

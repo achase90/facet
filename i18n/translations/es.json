@@ -1078,7 +1078,18 @@
       "mark_panorama": "Marcar como un panorama",
       "mark_hdr_panorama": "Marcar como un panorama HDR",
       "marked_panorama": "{count} fotos marcadas como un panorama",
-      "mark_needs_two": "Seleccione al menos dos fotos"
+      "mark_needs_two": "Seleccione al menos dos fotos",
+      "mark_needs_paths": "Seleccione las fotos en sí — una selección de toda la vista no puede ser una serie",
+      "mark_too_many": "Una serie contiene como máximo {max} fotos, y {count} están seleccionadas",
+      "view_scope_active": "Vista completa seleccionada — {count} fotos",
+      "view_scope_offer": "Las {count} fotos cargadas hasta ahora están seleccionadas.",
+      "view_scope_select_all": "Seleccionar las {total} fotos de esta vista",
+      "view_scope_confirm_title": "¿Aplicar a toda la vista?",
+      "view_scope_confirm_message": "Esto modificará {count} fotos que coinciden con los filtros actuales, incluidas las que no están cargadas en pantalla. ¿Continuar?",
+      "view_scope_mismatch": "Se modificaron {count} fotos, no las {announced} anunciadas — la vista cambió mientras se ejecutaba la acción",
+      "view_scope_empty": "Ya no hay nada que coincida con los filtros actuales",
+      "download_confirm_title": "¿Descargar {count} fotos?",
+      "download_confirm_message": "Cada foto se descarga como un archivo independiente. {count} de ellas tardarán un tiempo y podrían saturar el navegador."
     },
     "keep_top": {
       "label": "Conservar % superior",
@@ -2314,6 +2325,8 @@
     "copy_keeps": "Copiar los conservados a una carpeta",
     "move_rejects": "Mover los descartados a una carpeta",
     "trash_rejects": "Enviar descartados a la papelera",
+    "trash_disabled": "La papelera está deshabilitada — un administrador puede habilitarla mediante viewer.cull.allow_trash.",
+    "trash_missing_pkg": "La papelera no está disponible en este servidor — el paquete send2trash no está instalado.",
     "target_dir": "Carpeta de destino",
     "include_companions": "Incluir RAW / XMP asociados",
     "include_sequence_siblings": "Incluir fotogramas asociados (horquillado/panorama)",

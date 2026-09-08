@@ -15,7 +15,14 @@ import { I18N, I18N_KEYS } from '../../core/i18n/keys';
 type CullAction = 'copy_keeps' | 'trash_rejects' | 'move_rejects';
 
 interface CullRequest {
-  paths: string[];
+  /** Named photos. Omitted, not empty, when `filters` names the set instead —
+   *  the server takes exactly one of the two. */
+  paths?: string[];
+  /** The whole current gallery view, from which the server derives the rows.
+   *  Uncapped, where a path list is bounded at 10,000. */
+  filters?: Record<string, string> | null;
+  /** Photos unticked out of a filter-scoped selection. */
+  exclude?: string[];
   action: CullAction;
   target_dir: string | null;
   include_companions: boolean;
@@ -60,6 +67,12 @@ interface CullResponse {
           </label>
         }
       </div>
+
+      @if (!data.trashAvailable) {
+        <p class="text-xs opacity-60 mb-3">
+          {{ (data.allowTrash ? I18N.cull.trash_missing_pkg : I18N.cull.trash_disabled) | translate }}
+        </p>
+      }
 
       @if (needsTarget()) {
         <label for="cullTargetDir" class="block text-xs opacity-60 mb-1">{{ I18N.cull.target_dir | translate }}</label>
@@ -123,9 +136,21 @@ export class CullDialogComponent {
   private readonly snackBar = inject(MatSnackBar);
   private readonly i18n = inject(I18nService);
   private readonly dialogRef = inject(MatDialogRef<CullDialogComponent>);
-  private readonly data = inject<{ paths: string[] }>(MAT_DIALOG_DATA);
+  protected readonly data = inject<{
+    paths: string[];
+    /** Set when the selection is the whole filtered view rather than a path list. */
+    filters?: Record<string, string> | null;
+    exclude?: string[];
+    /** How many photos the selection stands for — larger than `paths.length`
+     *  under a filter-scoped selection, where no list is sent at all. */
+    count?: number;
+    trashAvailable?: boolean;
+    allowTrash?: boolean;
+  }>(MAT_DIALOG_DATA);
 
-  protected readonly actions: CullAction[] = ['copy_keeps', 'move_rejects', 'trash_rejects'];
+  protected readonly actions: CullAction[] = this.data.trashAvailable
+    ? ['copy_keeps', 'move_rejects', 'trash_rejects']
+    : ['copy_keeps', 'move_rejects'];
   protected readonly action = signal<CullAction>('copy_keeps');
   protected readonly targetDir = signal('');
   protected readonly includeCompanions = signal(false);
@@ -137,7 +162,7 @@ export class CullDialogComponent {
   protected readonly errorDetail = signal<string | null>(null);
 
   protected readonly needsTarget = computed(() => this.action() !== 'trash_rejects');
-  protected readonly count = this.data.paths.length;
+  protected readonly count = this.data.count ?? this.data.paths.length;
 
   protected setAction(a: CullAction): void {
     this.action.set(a);
@@ -152,8 +177,13 @@ export class CullDialogComponent {
   }
 
   private body(dryRun: boolean): CullRequest {
+    const filters = this.data.filters ?? null;
     return {
-      paths: this.data.paths,
+      // Exactly one target form reaches the server: a filter-scoped selection
+      // sends no path list at all, which is what lifts the 10,000-path cap.
+      paths: filters ? undefined : this.data.paths,
+      filters: filters ?? undefined,
+      exclude: filters ? (this.data.exclude ?? []) : undefined,
       action: this.action(),
       target_dir: this.needsTarget() ? this.targetDir() : null,
       include_companions: this.includeCompanions(),

@@ -39,7 +39,17 @@
         }
       }
     },
-    "viewer": { "type": "object" },
+    "viewer": {
+      "type": "object",
+      "properties": {
+        "cull": {
+          "type": "object",
+          "properties": {
+            "allow_trash": { "type": "boolean" }
+          }
+        }
+      }
+    },
     "processing": { "type": "object" },
     "scoring": { "type": "object" },
     "thresholds": { "type": "object" },

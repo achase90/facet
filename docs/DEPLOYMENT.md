@@ -93,6 +93,19 @@ A destination that resolves outside every mounted volume is refused (`403`) — 
 
 **This is not a container-user permission problem.** The `facet` user's UID inside the container commonly differs from your host account's UID, and that can cause a real, separate filesystem-permission failure on a bind mount — but that happens *after* this path check passes, when the copy/symlink/move actually runs, and it is logged server-side with the underlying OS error for the file that failed. A `403 target_dir is not an allowed export location` (or a generic "access denied" in the UI) happens *before* any file is touched and has nothing to do with UIDs.
 
+### Where a Container's Trash Goes
+
+When `viewer.cull.allow_trash` is on, `trash_rejects` calls `send2trash`, which implements the freedesktop.org trash specification and picks one of two destinations depending on whether the file and your `$HOME` share a filesystem. In the shipped container layout — photos bind-mounted at `/data/photos`, running as uid 1000 with `HOME=/home/facet` — they never do: `/data/photos` is its own mount inside the container (`os.path.ismount()` is `True` for it) and sits on a different device from the container's overlay `$HOME` — compare `os.stat(...).st_dev` for a photo and for `$HOME` if you want to confirm it on your own deployment; the values themselves vary by host, only the fact that they differ matters. `send2trash` therefore takes the spec's *volume trash* branch, not the home-trash one: a rejected file lands at `/data/photos/.Trash-1000/files/<name>`, with a matching `<name>.trashinfo` recording `Path=` and `DeletionDate=` under `/data/photos/.Trash-1000/info/`. That directory is created mode `0700`.
+
+Because `/data/photos` is the bind mount itself, `.Trash-1000` is visible and intact on the **host** side of the mount — a plain `mv` out of `files/` restores a trashed photo, with no container access needed. Facet's own scanner will not stumble back onto it: `os.walk` prunes dot-directories when `scanning.skip_hidden_directories` is true (the default), so a trashed file stays invisible to a rescan with that flag on, and is found again if you turn it off.
+
+Two cases behave differently:
+
+- **No bind mount for the photo tree** (e.g. `docker run` storing photos on the container's own filesystem) puts the photos on the same device as `$HOME`, so `send2trash` uses the container-local home trash (`~/.local/share/Trash`) instead — which is lost when the container is removed.
+- **Rootless Podman** maps the container's uid 1000 to a host subuid, so the host-side owner of `.Trash-1000` is that mapped id, not your own account; reading or restoring from it on the host may need `podman unshare`.
+
+If you want trashed files somewhere you chose, rather than a hidden per-volume trash folder, `move_rejects` to an explicit subfolder (see [Cull to folder](VIEWER.md#cull-to-folder)) remains the alternative — it is container-safe the same way, and the destination is whatever `target_dir` you name.
+
 ### Config File Ownership
 
 The same UID boundary applies to `/config/scoring_config.json` itself. Facet only

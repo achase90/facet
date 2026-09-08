@@ -1078,7 +1078,18 @@
       "mark_panorama": "Mark as one panorama",
       "mark_hdr_panorama": "Mark as one HDR panorama",
       "marked_panorama": "{count} photos marked as one panorama",
-      "mark_needs_two": "Select at least two photos"
+      "mark_needs_two": "Select at least two photos",
+      "mark_needs_paths": "Select the frames themselves — a whole-view selection cannot be one set",
+      "mark_too_many": "A set holds at most {max} frames, and {count} are selected",
+      "view_scope_active": "Whole view selected — {count} photos",
+      "view_scope_offer": "All {count} photos loaded so far are selected.",
+      "view_scope_select_all": "Select all {total} in this view",
+      "view_scope_confirm_title": "Apply to the whole view?",
+      "view_scope_confirm_message": "This will change {count} photos matching the current filters, including ones not loaded on screen. Continue?",
+      "view_scope_mismatch": "Changed {count} photos, not the {announced} announced — the view moved while the action ran",
+      "view_scope_empty": "Nothing matches the current filters any more",
+      "download_confirm_title": "Download {count} photos?",
+      "download_confirm_message": "Each photo is downloaded as a separate file. {count} of them will take a while and may overwhelm the browser."
     },
     "keep_top": {
       "label": "Keep top %",
@@ -2314,6 +2325,8 @@
     "copy_keeps": "Copy keeps to folder",
     "move_rejects": "Move rejects to folder",
     "trash_rejects": "Trash rejects (to OS trash)",
+    "trash_disabled": "Trashing is disabled — an administrator can enable it via viewer.cull.allow_trash.",
+    "trash_missing_pkg": "OS-trash is unavailable on this server — the send2trash package is not installed.",
     "target_dir": "Target folder",
     "include_companions": "Include companion RAW / XMP",
     "include_sequence_siblings": "Include sequence siblings (bracket/panorama frames)",

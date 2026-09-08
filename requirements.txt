@@ -77,9 +77,14 @@ reverse_geocoder>=1.5.1
 # Config schema validation (scoring_config.json structural checks)
 jsonschema>=4.18.0
 
-# Cull-to-folder "trash rejects" action (optional; viewer.cull.allow_trash).
-# Recoverable OS-trash, never a permanent delete. Install via .[cull].
-# send2trash>=1.8.0
+# Powers POST /api/cull/apply's trash_rejects action, gated at runtime by
+# viewer.cull.allow_trash (off by default) — recoverable OS-trash, never a
+# permanent delete. Pure Python, no dependencies of its own. Shipped as a base
+# dependency rather than an optional extra: the Docker/Podman image installs
+# from requirements.lock.txt / requirements.legacy.lock.txt, never from a
+# pyproject extra, so an extra-gated install never reached the image and the
+# endpoint 400'd on every container (issue #125).
+send2trash>=1.8.0
 
 # In-photo OCR text search (OPTIONAL, OFF by default — scoring_config.json "ocr").
 # Powers `--detect-text`, which fills photos.ocr_text and is indexed by photos_fts.

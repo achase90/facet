@@ -1078,7 +1078,18 @@
       "mark_panorama": "Segna come un panorama",
       "mark_hdr_panorama": "Segna come un panorama HDR",
       "marked_panorama": "{count} foto segnate come un panorama",
-      "mark_needs_two": "Seleziona almeno due foto"
+      "mark_needs_two": "Seleziona almeno due foto",
+      "mark_needs_paths": "Seleziona le foto stesse — una selezione dell'intera vista non può essere una serie",
+      "mark_too_many": "Una serie contiene al massimo {max} foto, e {count} sono selezionate",
+      "view_scope_active": "Intera vista selezionata — {count} foto",
+      "view_scope_offer": "Tutte le {count} foto caricate finora sono selezionate.",
+      "view_scope_select_all": "Seleziona tutte le {total} foto di questa vista",
+      "view_scope_confirm_title": "Applicare all'intera vista?",
+      "view_scope_confirm_message": "Questo modificherà {count} foto corrispondenti ai filtri attuali, incluse quelle non caricate a schermo. Continuare?",
+      "view_scope_mismatch": "Modificate {count} foto, non le {announced} annunciate — la vista è cambiata durante l'azione",
+      "view_scope_empty": "Nulla corrisponde più ai filtri attuali",
+      "download_confirm_title": "Scaricare {count} foto?",
+      "download_confirm_message": "Ogni foto viene scaricata come file separato. {count} di esse richiederanno tempo e potrebbero sovraccaricare il browser."
     },
     "keep_top": {
       "label": "Tieni top %",
@@ -2314,6 +2325,8 @@
     "copy_keeps": "Copia i mantenuti in una cartella",
     "move_rejects": "Sposta gli scartati in una cartella",
     "trash_rejects": "Cestina gli scartati",
+    "trash_disabled": "Il cestino è disabilitato — un amministratore può abilitarlo tramite viewer.cull.allow_trash.",
+    "trash_missing_pkg": "Il cestino non è disponibile su questo server — il pacchetto send2trash non è installato.",
     "target_dir": "Cartella di destinazione",
     "include_companions": "Includi RAW / XMP associati",
     "include_sequence_siblings": "Includi i fotogrammi associati (bracketing/panorama)",
