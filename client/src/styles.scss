@@ -2,6 +2,10 @@
 @use "tailwindcss";
 @use './fonts';
 
+// Lets components cancel a translucency effect for users who set the OS
+// "reduce transparency" preference (photo-card's current-photo dimming).
+@custom-variant reduce-transparency (@media (prefers-reduced-transparency: reduce));
+
 // Default theme (orange)
 html {
   @include mat.theme((

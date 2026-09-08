@@ -14,6 +14,7 @@ import {
   TemplateRef,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { LiveAnnouncer } from '@angular/cdk/a11y';
 import { MatSidenav, MatSidenavModule, MatSidenavContent } from '@angular/material/sidenav';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatIconModule } from '@angular/material/icon';
@@ -29,12 +30,13 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { ActivatedRoute, Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
-import { GalleryStore, PhotoFlagSnapshot } from './gallery.store';
+import { GalleryStore, BatchResult } from './gallery.store';
 import { Photo } from '../../shared/models/photo.model';
 import { isTypingContext } from '../../shared/utils/keyboard';
 import { UndoService } from '../../core/services/undo.service';
 import { SequenceOverrideService, SequenceKind } from '../../core/services/sequence-override.service';
 import { SequenceKindIconPipe } from '../../shared/pipes/sequence-kind.pipe';
+import { IsSelectedPipe } from '../../shared/pipes/selection.pipe';
 import { PhotoSetKindIconPipe, PhotoSetKindLabelPipe } from '../../shared/pipes/photo-set-kind.pipe';
 import { AuthService } from '../../core/services/auth.service';
 import { useDesktopSignal, DETAILS_RAIL_MIN_WIDTH_PX } from '../../shared/utils/media-query';
@@ -85,6 +87,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
     MatBottomSheetModule,
     TranslatePipe,
     SequenceKindIconPipe,
+    IsSelectedPipe,
     PhotoSetKindIconPipe,
     PhotoSetKindLabelPipe,
     MatSnackBarModule,
@@ -280,6 +283,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
               [attr.aria-rowcount]="rowsModel().length"
               class="flex flex-col p-2 md:p-4 outline-none"
               (keydown)="onGridKeydown($event)"
+              (focusout)="onGridFocusOut($event)"
             >
               <div [style.height.px]="topSpacer()" aria-hidden="true"></div>
               @for (row of visibleRows(); track row.photos[0].path) {
@@ -296,14 +300,16 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [hideDetails]="true"
                       [mosaicMode]="effectiveGalleryMode() === 'mosaic'"
                       [config]="store.config()"
-                      [isSelected]="selectedPaths().has(photo.path)"
+                      [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
+                      [isActive]="row.startIndex + i === activeIndex()"
+                      [gridHasActiveCard]="hasActivePhoto()"
                       [currentSort]="store.filters().sort"
                       [thumbSize]="thumbSize()"
                       [isEditionMode]="auth.isEdition()"
                       [personFilterId]="store.filters().person_id"
                       [tooltipMode]="tooltipMode()"
                       [panelActivation]="panelActivation()"
-                      (selectionChange)="toggleSelection($event.photo, $event.event)"
+                      (selectionChange)="toggleSelection($event.photo, $event.event, row.startIndex + i)"
                       (tooltipShow)="showTooltip($event.event, $event.photo)"
                       (tooltipHide)="hideTooltip()"
                       (tagClicked)="store.updateFilter('tag', $event)"
@@ -331,6 +337,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
               class="grid grid-cols-1 gap-2 p-2 md:p-4 outline-none"
               [style.grid-template-columns]="galleryColsStyle()"
               (keydown)="onGridKeydown($event)"
+              (focusout)="onGridFocusOut($event)"
             >
               @for (photo of store.photos(); track photo.path; let i = $index) {
                 <app-photo-card
@@ -339,7 +346,9 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                   [photo]="photo"
                   [attr.data-pidx]="i"
                   [config]="store.config()"
-                  [isSelected]="selectedPaths().has(photo.path)"
+                  [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
+                  [isActive]="i === activeIndex()"
+                  [gridHasActiveCard]="hasActivePhoto()"
                   [hideDetails]="effectiveHideDetails()"
                   [currentSort]="store.filters().sort"
                   [thumbSize]="thumbSize()"
@@ -349,7 +358,7 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [panelActivation]="panelActivation()"
                   [style.content-visibility]="'auto'"
                   [style.contain-intrinsic-size]="'auto ' + (cardWidth() + 80) + 'px'"
-                  (selectionChange)="toggleSelection($event.photo, $event.event)"
+                  (selectionChange)="toggleSelection($event.photo, $event.event, i)"
                   (tooltipShow)="showTooltip($event.event, $event.photo)"
                   (tooltipHide)="hideTooltip()"
                   (tagClicked)="store.updateFilter('tag', $event)"
@@ -373,9 +382,16 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
               [attr.aria-label]="I18N.gallery.photo_grid | translate"
               class="flex flex-col gap-2 p-2 md:p-4 outline-none"
               (keydown)="onGridKeydown($event)"
+              (focusout)="onGridFocusOut($event)"
             >
               @for (row of mosaicRows(); track row.photos[0]?.path ?? $index) {
-                <div class="flex gap-2" style="content-visibility: auto; contain-intrinsic-size: auto 300px">
+                <!-- No content-visibility on the row: it comes with paint
+                     containment, which clipped the current photo's marker off
+                     at the row's top and bottom edge. Each card below still
+                     declares its own, so what is given up is only the
+                     row-level grouping of the skip -- and only here, in the
+                     branch that keeps every row in the DOM. -->
+                <div class="flex gap-2">
                   @for (photo of row.photos; track photo.path; let i = $index) {
                     <app-photo-card
                   [collapsedSequenceKinds]="collapsedSequenceKinds()"
@@ -387,14 +403,16 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
                       [hideDetails]="true"
                       [mosaicMode]="true"
                       [config]="store.config()"
-                      [isSelected]="selectedPaths().has(photo.path)"
+                      [isSelected]="photo.path | isSelected:viewScoped():selectedPaths():excludedPaths()"
+                      [isActive]="row.startIndex + i === activeIndex()"
+                      [gridHasActiveCard]="hasActivePhoto()"
                       [currentSort]="store.filters().sort"
                       [thumbSize]="thumbSize()"
                       [isEditionMode]="auth.isEdition()"
                       [personFilterId]="store.filters().person_id"
                       [tooltipMode]="tooltipMode()"
                       [panelActivation]="panelActivation()"
-                      (selectionChange)="toggleSelection($event.photo, $event.event)"
+                      (selectionChange)="toggleSelection($event.photo, $event.event, row.startIndex + i)"
                       (tooltipShow)="showTooltip($event.event, $event.photo)"
                       (tooltipHide)="hideTooltip()"
                       (tagClicked)="store.updateFilter('tag', $event)"
@@ -512,8 +530,17 @@ const RENDER_MIGRATION_DISMISSED_KEY = 'facet_render_migration_dismissed';
 
     <!-- Selection action bar -->
     @if (selectionCount()) {
-      <div class="fixed bottom-0 left-0 right-0 z-50 flex items-center justify-center gap-1 lg:gap-3 px-2 lg:px-6 py-1 lg:py-3 max-lg:pb-[max(0.25rem,env(safe-area-inset-bottom))] bg-[var(--mat-sys-surface-container)] border-t border-[var(--mat-sys-outline-variant)] shadow-lg">
-        <span class="text-sm font-medium shrink-0">{{ I18N.gallery.selection.count | translate:{ count: selectionCount() } }}</span>
+      <div data-selection-bar class="fixed bottom-0 left-0 right-0 z-50 flex flex-wrap items-center justify-center gap-1 lg:gap-3 px-2 lg:px-6 py-1 lg:py-3 max-lg:pb-[max(0.25rem,env(safe-area-inset-bottom))] bg-[var(--mat-sys-surface-container)] border-t border-[var(--mat-sys-outline-variant)] shadow-lg">
+        <!-- Every loaded photo is selected, but the view runs past the pages
+             fetched so far. Offer the rest explicitly on its own line (w-full
+             in a wrapping row) rather than silently widening what was asked. -->
+        @if (offerWholeView()) {
+          <div class="w-full flex flex-wrap items-center justify-center gap-2 text-xs opacity-80">
+            <span>{{ I18N.gallery.selection.view_scope_offer | translate:{ count: store.photos().length } }}</span>
+            <button mat-button class="!text-xs" (click)="selectWholeView()">{{ I18N.gallery.selection.view_scope_select_all | translate:{ total: store.total() } }}</button>
+          </div>
+        }
+        <span data-selection-status tabindex="-1" class="text-sm font-medium shrink-0">{{ (viewScoped() ? I18N.gallery.selection.view_scope_active : I18N.gallery.selection.count) | translate:{ count: selectionCount() } }}</span>
         <div class="flex items-center gap-0 lg:gap-2">
           <button mat-icon-button class="lg:!hidden" (click)="clearSelection()" [matTooltip]="I18N.gallery.selection.clear | translate" [attr.aria-label]="I18N.gallery.selection.clear | translate"><mat-icon>close</mat-icon></button>
           <button mat-button class="!hidden lg:!inline-flex" (click)="clearSelection()"><mat-icon>close</mat-icon> {{ I18N.gallery.selection.clear | translate }}</button>
@@ -621,6 +648,7 @@ export class GalleryComponent implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
   private readonly pageHelp = inject(PageHelpService);
   private readonly headerSlot = inject(HeaderSlotService);
+  private readonly liveAnnouncer = inject(LiveAnnouncer);
   private readonly galleryToolbar = viewChild<TemplateRef<unknown>>('galleryToolbar');
 
   // Album options for "Add to album" menu
@@ -654,11 +682,29 @@ export class GalleryComponent implements OnInit, OnDestroy {
 
   // Selection state lives in the store (survives navigation, visible to services)
   protected readonly selectedPaths = this.store.selectedPaths;
+  protected readonly excludedPaths = this.store.excludedPaths;
   protected readonly selectionCount = this.store.selectionCount;
+  /** True while the selection means "the whole filtered view", not a path list. */
+  protected readonly viewScoped = this.store.viewScopeSelected;
 
   /** True when every loaded photo is already selected. */
   protected readonly allLoadedSelected = computed(() =>
     this.store.photos().length > 0 && this.selectionCount() >= this.store.photos().length,
+  );
+
+  /**
+   * Whether to offer widening the selection to the whole filtered view.
+   *
+   * Only when it would actually add something: the loaded photos are all
+   * selected, the view holds more than those, and the selection is not already
+   * view-scoped. Withheld under a similarity/semantic view, where there is no
+   * filter payload that reproduces what is on screen.
+   */
+  protected readonly offerWholeView = computed(() =>
+    !this.viewScoped()
+    && this.store.canScopeSelectionToView()
+    && this.allLoadedSelected()
+    && this.store.total() > this.store.photos().length,
   );
 
   /** True when the device has no hover capability (touch device) */
@@ -1099,20 +1145,113 @@ export class GalleryComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected toggleSelection(photo: Photo, event?: MouseEvent): void {
+  /** Selecting a photo with the pointer also moves the grid's cursor onto it,
+   *  so the next rating keystroke lands on the photo the user just clicked
+   *  rather than on wherever the arrow keys were left. The index comes from the
+   *  template because that is where it is already known -- it is the same
+   *  expression each call site feeds `data-pidx`, which is what `focusCard`
+   *  looks a card up by, so the cursor, the marker and the focus target cannot
+   *  drift apart. Deriving it here from the path would be a second answer to a
+   *  question the caller has already answered.
+   *
+   *  Focus is moved explicitly rather than left to the browser. A pointer click
+   *  does land focus on the card by itself, but only because `onSelect` lets
+   *  the default through, and only for a caller that really is a click; saying
+   *  it out loud makes the rule hold for any caller. It is also what lifts the
+   *  newly current card clear of the action bar that this very selection has
+   *  just raised over it. */
+  protected toggleSelection(photo: Photo, event: MouseEvent | undefined, index: number): void {
     this.store.toggleSelection(photo, event);
+    this.setCursor(index);
+    this.focusCard(index);
   }
 
   protected clearSelection(): void {
     this.store.clearSelection();
+    this.restoreCursorFocus();
   }
 
+  /** Keep DOM focus wherever the marker is, so that a drawn marker always means
+   *  a live keyboard.
+   *
+   *  `onGridKeydown` is bound on the grid containers, so the arrows and the
+   *  rating keys only reach this component while focus is inside one of them.
+   *  The marker is component state and outlives focus, which is where the two
+   *  come apart: every route that empties the selection is driven from the
+   *  action bar, and the bar unmounts the instant the count reaches zero, so
+   *  the control that was just clicked takes focus down with it and the browser
+   *  falls back to `<body>`. The photo stays framed in tertiary while nothing
+   *  typed at it does anything -- the marker promising a keyboard that is no
+   *  longer listening.
+   *
+   *  Nothing is taken while focus is already inside a grid. That leaves Escape
+   *  alone: it is the one route in from the inside, standing on the very card
+   *  it would be sent to, so handling it here would only re-focus and re-scroll
+   *  a card the user has not left. And nothing is taken when the cursor is not
+   *  on a photo that is actually in the results, because then no marker is
+   *  drawn and there is no promise to keep -- the card still sitting at that
+   *  index until the grid re-renders is not the photo the cursor means.
+   *
+   *  Nothing is scrolled, either. The card is still exactly where the user left
+   *  it; an action bar unmounting is not a reason to move the viewport under
+   *  them. That also settles the windowed-out case: a card that is not in the
+   *  DOM holds no focus to hand back, so the retry that would page it in is
+   *  deliberately not entered. */
+  private restoreCursorFocus(): void {
+    if (!this.hasActivePhoto()) return;
+    if (document.activeElement?.closest('[role="grid"]')) return;
+    this.focusCard(this.activeIndex(), false, false);
+  }
+
+  /**
+   * Both of these branch on whether anything is selected yet — an empty
+   * selection widens to the whole filtered view, a partial one to the loaded
+   * photos. The branch lives in the store rather than here so the three entry
+   * points (this bar, the mobile actions sheet, Ctrl+A) cannot drift apart.
+   */
   protected selectAll(): void {
-    this.store.selectAllLoaded();
+    this.store.selectAll();
+    this.anchorFocusAndAnnounceSelectionStatus();
   }
 
   protected invertSelection(): void {
     this.store.invertSelection();
+    this.announceSelectionStatus();
+  }
+
+  protected selectWholeView(): void {
+    this.store.selectWholeView();
+    this.anchorFocusAndAnnounceSelectionStatus();
+  }
+
+  /**
+   * Announce the selection the way the bar states it, reusing the count span's
+   * own translated text rather than adding a string all six language bundles
+   * would need. Every widening action announces; only the two that destroy
+   * their own button also move focus, below.
+   */
+  private announceSelectionStatus(): void {
+    const key = this.viewScoped() ? I18N.gallery.selection.view_scope_active : I18N.gallery.selection.count;
+    void this.liveAnnouncer.announce(this.i18n.t(key, { count: this.selectionCount() }));
+  }
+
+  /**
+   * Both whole-view toggle buttons ("select all in view" and its sibling
+   * "select all") live inside an `@if` keyed on the very selection state their
+   * own click flips (`offerWholeView()` / `allLoadedSelected()`), so Angular
+   * removes the still-focused button on the same tick and focus falls back to
+   * `document.body` with nothing announced. The selection-count span right
+   * after them states the new count either way and is never removed by either
+   * toggle, so it serves as the focus anchor (`tabindex="-1"` keeps it out of
+   * the tab order).
+   *
+   * Invert deliberately does NOT come through here: its button survives its own
+   * click, so moving focus would cost a keyboard user the place they need to
+   * press it again.
+   */
+  private anchorFocusAndAnnounceSelectionStatus(): void {
+    document.querySelector<HTMLElement>('[data-selection-status]')?.focus();
+    this.announceSelectionStatus();
   }
 
   /** Two panes is the smallest useful compare; past four they are too small to read. */
@@ -1121,7 +1260,7 @@ export class GalleryComponent implements OnInit, OnDestroy {
   );
 
   protected async compareSelection(): Promise<void> {
-    const selected = this.selectedPaths();
+    const selected = new Set(this.store.selectedLoadedPaths());
     // Keep the grid's order rather than selection order: comparing left-to-right
     // as they are laid out is what the user is already looking at.
     const photos = this.store.photos().filter(p => selected.has(p.path)).slice(0, MAX_COMPARE_PANES);
@@ -1147,37 +1286,106 @@ export class GalleryComponent implements OnInit, OnDestroy {
     this.selectAll();
   }
 
-  protected copyPaths(): void {
-    const filenames = [...this.selectedPaths()].map(basename);
-    copyLines(filenames).then(() => {
-      this.snackBar.open(this.i18n.t(I18N.gallery.selection.copied), '', { duration: 2000 });
-    });
+  /**
+   * The selected paths as strings, fetched from the server when the selection
+   * is the whole view.
+   *
+   * Only for the handful of actions that genuinely need filenames on the client
+   * (copy, download, add-to-album): everything else sends the filter and lets
+   * the server derive the rows, which is the point of the view scope.
+   */
+  private async resolveSelectionPaths(): Promise<string[] | null> {
+    if (!this.viewScoped()) return [...this.selectedPaths()];
+    return this.store.pathsInView();
+  }
+
+  protected async copyPaths(): Promise<void> {
+    const paths = await this.resolveSelectionPaths();
+    if (!paths?.length) return;
+    await copyLines(paths.map(basename));
+    this.snackBar.open(this.i18n.t(I18N.gallery.selection.copied), '', { duration: 2000 });
   }
 
   /** Above this size, undo (chunked per-photo inverse calls) is not offered. */
   private static readonly UNDO_MAX_PHOTOS = 500;
 
+  /** Above this many photos a download is confirmed first: it is one blob fetch
+   *  plus one synthetic anchor click per photo, and a whole-view selection (or
+   *  a "Keep top N%" one) turns that into thousands. */
+  private static readonly DOWNLOAD_CONFIRM_PHOTOS = 50;
+
+  /** The server caps a sequence correction at 500 frames, and a set is a
+   *  handful of frames one camera shot together — so it is never "the view". */
+  private static readonly MARK_SEQUENCE_MAX_PHOTOS = 500;
+
+  /**
+   * Ask before a mutation runs over the whole filtered view.
+   *
+   * The count comes from the server rather than from `total()`, which is only
+   * ever whichever page response landed last. Returns the number shown to the
+   * user, or null if they declined (or it could not be fetched) — the caller
+   * checks the server's own count against it afterwards.
+   */
+  private async confirmWholeView(): Promise<number | null> {
+    const total = await this.store.countInView();
+    if (total === null) return null;
+    const count = Math.max(0, total - this.excludedPaths().size);
+    if (count === 0) {
+      this.snackBar.open(this.i18n.t(I18N.gallery.selection.view_scope_empty), '', { duration: 3000 });
+      return null;
+    }
+    const ref = this.dialog.open(ConfirmDialogComponent, {
+      data: {
+        title: this.i18n.t(I18N.gallery.selection.view_scope_confirm_title),
+        message: this.i18n.t(I18N.gallery.selection.view_scope_confirm_message, { count }),
+      },
+    });
+    const confirmed = await firstValueFrom(ref.afterClosed());
+    return confirmed ? count : null;
+  }
+
   private async executeBatchAction(
-    action: (paths: string[]) => Promise<Map<string, PhotoFlagSnapshot> | null>,
+    action: (paths: string[]) => Promise<BatchResult | null>,
     i18nKey: string,
     extraParams?: Record<string, string | number>,
   ): Promise<void> {
+    const viewScoped = this.viewScoped();
+    let announced: number | null = null;
+    if (viewScoped) {
+      announced = await this.confirmWholeView();
+      if (announced === null) return;
+    }
     const paths = [...this.selectedPaths()];
-    const snapshot = await action(paths);
-    if (snapshot === null) return; // store reverted and notified
+    const result = await action(paths);
+    if (result === null) return; // store reverted and notified
     this.clearSelection();
-    const params = { count: paths.length, ...extraParams };
-    if (snapshot.size > 0 && snapshot.size <= GalleryComponent.UNDO_MAX_PHOTOS) {
+    const params = { count: result.count, ...extraParams };
+    // Undo replays inverse calls from a snapshot, and the snapshot can only
+    // cover LOADED photos -- so offering it for an action that reached further
+    // would promise to restore 64 of 5,000. Gate on coverage, not just size.
+    const covered = result.snapshot.size === result.targeted;
+    if (covered && result.snapshot.size > 0 && result.snapshot.size <= GalleryComponent.UNDO_MAX_PHOTOS) {
       this.undoService.register({
         labelKey: i18nKey,
         labelParams: params,
         undo: async () => {
-          await this.store.restoreSnapshot(snapshot);
-          this.store.restoreSelection(paths);
+          await this.store.restoreSnapshot(result.snapshot);
+          // The snapshot's keys, not `paths`: they are the same set whenever
+          // undo is offered at all (that is what `covered` asserts), and they
+          // are the only ones a view-scoped action ever named.
+          this.store.restoreSelection(result.snapshot.keys());
         },
       });
     } else {
       this.snackBar.open(this.i18n.t(i18nKey, params), '', { duration: 2000 });
+    }
+    // The view can move between the count and the write (another session, a
+    // scan). Say so rather than absorbing it: the user approved a number.
+    if (announced !== null && announced !== result.count) {
+      this.snackBar.open(
+        this.i18n.t(I18N.gallery.selection.view_scope_mismatch, { count: result.count, announced }),
+        '', { duration: 5000 },
+      );
     }
   }
 
@@ -1202,9 +1410,25 @@ export class GalleryComponent implements OnInit, OnDestroy {
    * frames is the floor because one frame is not a set.
    */
   protected async markAsPanorama(kind: SequenceKind): Promise<void> {
+    // Unlike the flag mutations, this one keeps its path list: the server caps
+    // the correction at MARK_SEQUENCE_MAX_PHOTOS frames and there is no
+    // filter-scoped form, because declaring a whole view to be one panorama is
+    // not a thing anyone means.
+    if (this.viewScoped()) {
+      this.snackBar.open(this.i18n.t(I18N.gallery.selection.mark_needs_paths), '', { duration: 4000 });
+      return;
+    }
     const paths = [...this.selectedPaths()];
     if (paths.length < 2) {
       this.snackBar.open(this.i18n.t(I18N.gallery.selection.mark_needs_two), '', { duration: 3000 });
+      return;
+    }
+    if (paths.length > GalleryComponent.MARK_SEQUENCE_MAX_PHOTOS) {
+      this.snackBar.open(
+        this.i18n.t(I18N.gallery.selection.mark_too_many,
+                    { count: paths.length, max: GalleryComponent.MARK_SEQUENCE_MAX_PHOTOS }),
+        '', { duration: 4000 },
+      );
       return;
     }
     try {
@@ -1277,17 +1501,25 @@ export class GalleryComponent implements OnInit, OnDestroy {
       case 'compare': await this.compareSelection(); break;
       case 'export': this.openExportDialog(); break;
       case 'cull': await this.openCullDialog(); break;
-      case 'copy': this.copyPaths(); break;
+      case 'copy': await this.copyPaths(); break;
       case 'mark-panorama': await this.markAsPanorama(action.sequenceKind); break;
       case 'download': await this.downloadSelected(action.type, action.profile); break;
     }
   }
 
   protected async downloadSelected(type = 'original', profile?: string): Promise<void> {
+    const paths = await this.resolveSelectionPaths();
+    if (!paths?.length) return;
+    // One blob fetch and one synthetic anchor click per photo, serially: past a
+    // few dozen that is a browser-melting amount of work to start by accident,
+    // and both "Keep top N%" and a whole-view selection reach thousands.
+    if (paths.length > GalleryComponent.DOWNLOAD_CONFIRM_PHOTOS && !await this.confirmDownload(paths.length)) {
+      return;
+    }
     this.downloading.set(true);
     try {
       await downloadAll(
-        [...this.selectedPaths()],
+        paths,
         path => this.api.downloadUrl(path, type, profile),
         url => this.api.getRaw(url),
       );
@@ -1296,13 +1528,25 @@ export class GalleryComponent implements OnInit, OnDestroy {
     }
   }
 
+  private async confirmDownload(count: number): Promise<boolean> {
+    const ref = this.dialog.open(ConfirmDialogComponent, {
+      data: {
+        title: this.i18n.t(I18N.gallery.selection.download_confirm_title, { count }),
+        message: this.i18n.t(I18N.gallery.selection.download_confirm_message, { count }),
+      },
+    });
+    return !!await firstValueFrom(ref.afterClosed());
+  }
+
   protected openAlbumScoped(path: string, albumId: number): void {
     void this.router.navigate([path], { queryParams: { album: albumId } });
   }
 
   async addToAlbum(albumId: number): Promise<void> {
-    const paths = [...this.selectedPaths()];
-    if (!paths.length) return;
+    // No filter-scoped form server-side, so a whole-view selection resolves to
+    // paths here rather than adding nothing at all.
+    const paths = await this.resolveSelectionPaths();
+    if (!paths?.length) return;
     await firstValueFrom(this.albumService.addPhotos(albumId, paths));
     this.snackBar.open(this.i18n.t(I18N.albums.photos_added), '', { duration: 2000 });
     this.clearSelection();
@@ -1328,30 +1572,45 @@ export class GalleryComponent implements OnInit, OnDestroy {
 
   openExportDialog(): void {
     const albumId = this.route.snapshot.paramMap.get('albumId');
+    if (albumId) {
+      this.dialog.open(ExportEditorDialogComponent, { width: '420px', data: { albumId: +albumId } });
+      return;
+    }
+    // Under view scope the dialog gets the filter, not a path list, so the
+    // export is not bounded by the endpoint's 10,000-path cap.
     this.dialog.open(ExportEditorDialogComponent, {
       width: '420px',
-      data: albumId
-        ? { albumId: +albumId }
+      data: this.viewScoped()
+        ? { filters: this.store.filterPayload(), exclude: [...this.excludedPaths()], count: this.selectionCount() }
         : { paths: [...this.selectedPaths()] },
     });
   }
 
   async openCullDialog(): Promise<void> {
+    const viewScoped = this.viewScoped();
     const paths = [...this.selectedPaths()];
-    if (!paths.length) return;
+    if (!viewScoped && !paths.length) return;
     const { CullDialogComponent } = await import('./cull-dialog.component');
     const ref = this.dialog.open(CullDialogComponent, {
       width: '32rem',
       data: {
         paths,
+        // Same trade as the export: the filter travels instead of the paths, so
+        // a whole-view cull is not bounded by the endpoint's 10,000-path cap.
+        filters: viewScoped ? this.store.filterPayload() : null,
+        exclude: viewScoped ? [...this.excludedPaths()] : [],
+        count: this.selectionCount(),
         trashAvailable: this.store.config()?.cull?.trash_available ?? false,
         allowTrash: this.store.config()?.cull?.allow_trash ?? false,
       },
     });
     const applied = await firstValueFrom(ref.afterClosed());
     if (applied) {
-      this.clearSelection();
+      // Reload first: clearing the selection hands focus back to the marked
+      // card, and the rows the cull has just moved away are still standing in
+      // the list until this returns.
       await this.store.loadPhotos();
+      this.clearSelection();
     }
   }
 
@@ -1520,6 +1779,73 @@ export class GalleryComponent implements OnInit, OnDestroy {
   /** Index of the keyboard-focused photo; -1 when keyboard nav is inactive. */
   protected readonly activeIndex = signal(-1);
 
+  /** Path of the photo the cursor is standing on, kept in step with the index.
+   *
+   *  The index on its own only means anything against the list that was on
+   *  screen when it was set. A filter change that yields a result set of the
+   *  same length or longer keeps it in bounds, so the marker quietly reframes
+   *  an unrelated photo -- and that is where the next rating keystroke lands. */
+  private readonly activePath = signal<string | null>(null);
+
+  /** Move the cursor onto `index`, keeping the photo it means in step with it.
+   *  -1 -- or any index past the end -- clears both. */
+  private setCursor(index: number): void {
+    this.activeIndex.set(index);
+    this.activePath.set(this.store.photos()[index]?.path ?? null);
+  }
+
+  /** Re-find the marked photo whenever the result set changes, so the cursor
+   *  follows the photo rather than the slot, and drops to nothing once the
+   *  photo is no longer in the results. The scan is O(n) over the result set,
+   *  but it runs once per list change, not once per keystroke.
+   *
+   *  Only the list is tracked. The effect writes both cursor signals, so
+   *  reading them tracked would make it re-run on its own writes. */
+  private readonly cursorFollowsPhoto = effect(() => {
+    const photos = this.store.photos();
+    untracked(() => {
+      const path = this.activePath();
+      if (path === null) return;
+      const at = photos.findIndex(p => p.path === path);
+      if (at === this.activeIndex()) return;
+      this.activeIndex.set(at);
+      if (at < 0) this.activePath.set(null);
+    });
+  });
+
+  /** Drop the cursor when focus genuinely leaves a grid.
+   *
+   *  The cards fade everything that is not the current photo, so a marker left
+   *  standing while focus sits in the filter sidebar or a dialog dims the whole
+   *  gallery for a keyboard that is no longer listening -- and a mouse-only
+   *  user, who never puts focus back into a grid, would carry that from their
+   *  first click to the end of the session.
+   *
+   *  Two destinations do not count as leaving. Another card in the same grid is
+   *  the cursor moving, not going away. The selection action bar is where Clear
+   *  lives, and `clearSelection` has to be able to hand focus back to the marked
+   *  card afterwards, so the bar is excluded by name. A null relatedTarget --
+   *  focus dropped to the body, or out to the browser chrome -- does count. */
+  protected onGridFocusOut(event: FocusEvent): void {
+    const next = event.relatedTarget as HTMLElement | null;
+    if (next?.closest('[role="grid"], [data-selection-bar]')) return;
+    this.setCursor(-1);
+  }
+
+  /** Whether the cursor is actually standing on a photo that is on screen.
+   *
+   *  The cards fade everything that is not the current photo, so this has to be
+   *  false in both of the cases where there is nothing to leave at full
+   *  strength: before the cursor has ever moved (-1), and after a filter change
+   *  has left it pointing past the end of a shorter result set. Either one
+   *  would otherwise render the whole grid dimmed with nothing marked.
+   *
+   *  `cursorFollowsPhoto` normally resolves the second case to -1 outright, but
+   *  it runs when effects are flushed; this reads straight off the signals, so
+   *  it also covers the frame in between. */
+  protected readonly hasActivePhoto = computed(() =>
+    this.activeIndex() >= 0 && this.activeIndex() < this.store.photos().length);
+
   /** Columns per row in grid mode (mirrors the CSS auto-fill column math). */
   private gridColumns(): number {
     const width = this.containerWidth() - (this.isDesktop() ? 32 : 16);
@@ -1567,7 +1893,7 @@ export class GalleryComponent implements OnInit, OnDestroy {
     }
 
     event.preventDefault();
-    this.activeIndex.set(next);
+    this.setCursor(next);
     this.focusCard(next);
   }
 
@@ -1598,22 +1924,31 @@ export class GalleryComponent implements OnInit, OnDestroy {
     event.preventDefault();
     if (advance) {
       const next = Math.min(photos.length - 1, index + 1);
-      this.activeIndex.set(next);
+      this.setCursor(next);
       this.focusCard(next);
     }
   }
 
   /** Focus a card by photo index; if windowed out of the DOM, scroll its row
-   * into view first and retry once the window has rendered it. */
-  private focusCard(index: number, retried = false): void {
+   * into view first and retry once the window has rendered it.
+   *
+   * The tile inside the card takes the focus -- it is what carries the tabindex
+   * -- but the card itself is what gets scrolled: `scroll-margin` does not
+   * inherit, and the clearance that lifts the current photo out from under the
+   * action bar is declared on the card host. Asking the tile would ask an
+   * element that has none.
+   *
+   * `scroll = false` places focus without moving the viewport, and gives up on
+   * a card that is not in the DOM rather than paging it in. */
+  private focusCard(index: number, retried = false, scroll = true): void {
     const host = document.querySelector(`[data-pidx="${index}"]`) as HTMLElement | null;
     if (host) {
       const focusable = (host.querySelector('[tabindex]') as HTMLElement | null) ?? host;
-      focusable.focus();
-      focusable.scrollIntoView({ block: 'nearest' });
+      focusable.focus({ preventScroll: !scroll });
+      if (scroll) host.scrollIntoView({ block: 'nearest' });
       return;
     }
-    if (retried || !this.virtualOn()) return;
+    if (retried || !scroll || !this.virtualOn()) return;
     const row = this.rowsModel().find(r =>
       index >= r.startIndex && index < r.startIndex + r.photos.length);
     const content = this.scrollContent();

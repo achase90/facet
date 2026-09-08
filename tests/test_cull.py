@@ -278,6 +278,275 @@ _BRACKET = "bracket"
 _PANORAMA = "panorama"
 
 
+class TestCullApplyFilterScope:
+    """The ``filters`` branch must resolve the rows the gallery would show.
+
+    The client used to send an explicit path list here, so this branch was
+    never exercised and its resolver skipped ``_prepare_gallery_params`` -- the
+    step that expands the Photo Type presets. ``type=aerial`` therefore reached
+    ``_build_gallery_where`` as an unknown key, was dropped, and the cull
+    resolved to the WHOLE library view on an endpoint that moves and trashes
+    files.
+    """
+
+    @staticmethod
+    def _categorised_db(tmp_path, rows):
+        """``rows``: (path, category) pairs. Schema from ``init_database``."""
+        db = str(tmp_path / "cat.db")
+        init_database(db)
+        conn = sqlite3.connect(db)
+        for path, category in rows:
+            conn.execute(
+                "INSERT INTO photos (path, filename, category, is_rejected) "
+                "VALUES (?, ?, ?, 0)",
+                (path, os.path.basename(path), category),
+            )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_a_photo_type_preset_narrows_the_cull(self, client, tmp_path):
+        aerial = _make_file(tmp_path, "aerial.jpg")
+        field = _make_file(tmp_path, "field.jpg")
+        street = _make_file(tmp_path, "street.jpg")
+        db = self._categorised_db(tmp_path, [
+            (aerial, "aerial"), (field, "landscape"), (street, "street"),
+        ])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"type": "aerial"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["would_copy"] == [aerial]
+        assert body["matched"] == 1
+
+    def test_a_filter_the_where_builder_knows_still_narrows(self, client, tmp_path):
+        aerial = _make_file(tmp_path, "aerial.jpg")
+        field = _make_file(tmp_path, "field.jpg")
+        db = self._categorised_db(tmp_path, [(aerial, "aerial"), (field, "landscape")])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"category": "landscape"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 200
+        assert resp.json()["would_copy"] == [field]
+
+    def test_exclude_narrows_the_filter_set(self, client, tmp_path):
+        keep = _make_file(tmp_path, "keep.jpg")
+        drop = _make_file(tmp_path, "drop.jpg")
+        db = self._categorised_db(tmp_path, [(keep, "aerial"), (drop, "aerial")])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"type": "aerial"}, "exclude": [drop],
+                "action": "copy_keeps", "target_dir": str(tmp_path / "k"),
+                "dry_run": True,
+            })
+        assert resp.status_code == 200
+        assert resp.json()["would_copy"] == [keep]
+
+    def test_exclude_can_only_narrow_a_destructive_action(self, client, tmp_path):
+        rejected = _make_file(tmp_path, "r.jpg")
+        db = self._categorised_db(tmp_path, [(rejected, "aerial")])
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE photos SET is_rejected = 1")
+        conn.commit()
+        conn.close()
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"type": "aerial"}, "exclude": [rejected],
+                "action": "move_rejects", "target_dir": str(tmp_path / "k"),
+                "dry_run": False,
+            })
+        assert resp.status_code == 200
+        assert resp.json()["moved"] == 0
+        assert os.path.isfile(rejected)
+
+    def test_a_malformed_filter_set_is_422_not_500(self, client, tmp_path):
+        photo = _make_file(tmp_path, "a.jpg")
+        db = self._categorised_db(tmp_path, [(photo, "aerial")])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"per_page": "99999"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 422
+
+    @staticmethod
+    def _album_db(tmp_path, member_paths, other_paths):
+        """Photos split between album 1 and no album at all."""
+        db = str(tmp_path / "album.db")
+        init_database(db)
+        conn = sqlite3.connect(db)
+        for path in member_paths + other_paths:
+            conn.execute(
+                "INSERT INTO photos (path, filename, is_rejected) VALUES (?, ?, 0)",
+                (path, os.path.basename(path)),
+            )
+        conn.execute("INSERT INTO albums (id, user_id, name) VALUES (1, NULL, 'trip')")
+        conn.executemany(
+            "INSERT INTO album_photos (album_id, photo_path) VALUES (1, ?)",
+            [(p,) for p in member_paths],
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_an_album_scoped_cull_is_narrowed_to_its_members(self, client, tmp_path):
+        """The album filter must scope the destructive path like it scopes the grid."""
+        inside = _make_file(tmp_path, "inside.jpg")
+        outside = _make_file(tmp_path, "outside.jpg")
+        db = self._album_db(tmp_path, [inside], [outside])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"album_id": "1"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["would_copy"] == [inside]
+
+    def test_an_unknown_album_is_404_like_the_gallery_get(self, client, tmp_path):
+        """The album access check guarded the READ paths only.
+
+        ``gallery_scope_sql`` was reached here directly, so a POST body naming
+        an album the caller cannot open resolved its rows anyway -- on the
+        endpoint that moves and trashes files. Same status as
+        ``GET /api/photos?album_id=99`` (tests/test_gallery.py), and no file
+        touched.
+        """
+        inside = _make_file(tmp_path, "inside.jpg")
+        db = self._album_db(tmp_path, [inside], [])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"album_id": "99"}, "action": "move_rejects",
+                "target_dir": str(tmp_path / "k"), "dry_run": False,
+            })
+        assert resp.status_code == 404, resp.text
+        assert os.path.isfile(inside)
+        assert not os.path.exists(str(tmp_path / "k"))
+
+
+class TestCullApplyFilterScopeIsBounded:
+    """The ``filters`` branch must be bounded, like the sidecar export branch.
+
+    ``_selected_paths`` was called here with no cap at all, so a whole-library
+    filter set resolved to every path the library holds on an endpoint that
+    moves and trashes files. Mirrors
+    ``tests.test_export.TestExportSidecarsFilterScopeIsBounded``, with its own
+    cap constant (``_CULL_FILTER_MAX``) rather than reusing the sidecar one:
+    the per-photo cost that justifies a cap differs (cull does one
+    ``shutil.move``/``copy2`` or ``send2trash`` call per photo rather than two
+    ``exiftool`` subprocesses), even though both caps are 10000 today.
+    """
+
+    def test_the_cap_matches_the_explicit_path_limit(self):
+        """Both request forms bound the same work, so both bound it the same."""
+        from api.routers.export import CullApplyRequest, _CULL_FILTER_MAX
+
+        paths_max = CullApplyRequest.model_fields["paths"].metadata[0].max_length
+        assert _CULL_FILTER_MAX == paths_max == 10000
+
+    def test_a_view_over_the_cap_is_refused_even_as_a_dry_run(self, client, tmp_path):
+        paths = [_make_file(tmp_path, f"cap{i}.jpg") for i in range(3)]
+        db = TestCullApplyFilterScope._categorised_db(
+            tmp_path, [(p, "capped") for p in paths]
+        )
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+            mock.patch(f"{_EXPORT_MODULE}._CULL_FILTER_MAX", 2),
+        ):
+            # dry_run True (the endpoint's own default) so an over-cap preview
+            # cannot be used to do the unbounded work the real run is refused for.
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"category": "capped"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 412, resp.text
+        detail = resp.json()["detail"]
+        # Names the count AND the limit: "too many" alone leaves the user with
+        # no idea how far to narrow.
+        assert "3" in detail and "2" in detail
+        # Refused before any I/O, dry-run or not.
+        assert not os.path.exists(str(tmp_path / "k"))
+
+    def test_a_view_at_the_cap_still_proceeds(self, client, tmp_path):
+        paths = [_make_file(tmp_path, f"cap{i}.jpg") for i in range(2)]
+        db = TestCullApplyFilterScope._categorised_db(
+            tmp_path, [(p, "capped") for p in paths]
+        )
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+            mock.patch(f"{_EXPORT_MODULE}._CULL_FILTER_MAX", 2),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "filters": {"category": "capped"}, "action": "copy_keeps",
+                "target_dir": str(tmp_path / "k"), "dry_run": True,
+            })
+        assert resp.status_code == 200, resp.text
+        assert sorted(resp.json()["would_copy"]) == sorted(paths)
+
+
+class TestCullApplyTargetIsExactlyOne:
+    """``paths`` and ``filters`` name the same set two ways; never both.
+
+    Both-are-set used to resolve silently in ``paths``' favour --
+    ``_selected_paths`` returns before ``filters`` or ``exclude`` are read --
+    so a stale path list alongside a whole-view filter set dropped the scope
+    AND the exclusions on an endpoint that moves and trashes files. The twin of
+    ``TestBatchTargetIsExactlyOne`` in tests/test_batch_photo_writes.py.
+    """
+
+    def test_both_targets_is_422(self, client, tmp_path):
+        named = _make_file(tmp_path, "named.jpg")
+        filtered = _make_file(tmp_path, "filtered.jpg")
+        db = _db(tmp_path, [(named, 1), (filtered, 1)])
+        with (
+            mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)),
+            mock.patch(f"{_EXPORT_MODULE}._allowed_export_roots", return_value=[str(tmp_path)]),
+        ):
+            resp = client.post("/api/cull/apply", json={
+                "paths": [named], "filters": {"category": "aerial"},
+                "exclude": [filtered],
+                "action": "move_rejects", "target_dir": str(tmp_path / "k"),
+                "dry_run": False,
+            })
+        assert resp.status_code == 422, resp.text
+        assert os.path.isfile(named)
+        assert os.path.isfile(filtered)
+
+    def test_neither_target_is_still_400(self, client, tmp_path):
+        """The pre-existing status for a request with no target at all."""
+        db = _db(tmp_path, [])
+        with mock.patch(f"{_EXPORT_MODULE}.get_db", _db_cm(db)):
+            resp = client.post("/api/cull/apply", json={"action": "copy_keeps"})
+        assert resp.status_code == 400, resp.text
+
+
 class TestCullApplySequences:
     def test_copy_keeps_bracket_siblings_reported_and_included_when_flag_on(self, client, tmp_path):
         """A5#1: a 5-frame bracket contributes ONE selected path (the gallery

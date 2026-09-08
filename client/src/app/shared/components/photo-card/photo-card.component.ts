@@ -57,7 +57,61 @@ const DEFAULT_CLIPPING_BADGE_PERCENT = 5;
 @Component({
   selector: 'app-photo-card',
   standalone: true,
-  host: { role: 'gridcell', style: 'content-visibility: auto; contain-intrinsic-size: auto 300px' },
+  host: {
+    role: 'gridcell',
+    style: 'content-visibility: auto; contain-intrinsic-size: auto 300px',
+    // Room for the scrollIntoView the grid's keyboard cursor performs on the
+    // card it lands on. That call asks for `block: 'nearest'`, which is the
+    // least scrolling that brings an edge of the card to an edge of the
+    // scrollport and which takes no account of anything drawn over it -- and
+    // the gallery fixes an action bar across the bottom of the viewport for as
+    // long as anything is selected, which is exactly when the arrow keys are in
+    // use. Arrowing downward therefore parked the current card underneath it,
+    // star-rating badge and all, that badge sitting in the bottom-left corner.
+    // The clearance is sized for the tallest case the bar actually reaches.
+    // From lg up the scrollport runs to the bottom of the viewport, so the bar
+    // is what the card has to clear, and its height is not one number: given
+    // enough width the controls sit on a single row of 61px -- 1px of border,
+    // 36px of button at this theme's -1 density, and 12px of py-3 above and
+    // below it -- but from lg to around 1300px they wrap to a second row and it
+    // measures 93px. Adding the 6px the marker's own outline occupies outside
+    // the card puts the requirement at 99px, which is why this is 7rem: 5rem
+    // left 19px of the outline under the bar at those widths, and 6rem still
+    // falls 3px short. Below lg the shell already holds the scrollport 56px
+    // clear of the viewport bottom for its own nav, so the same 7rem merely
+    // over-scrolls a little, which shows more of the next row and costs
+    // nothing. One value rather than a binding on
+    // whether the bar is up: scroll-margin is inert until something calls
+    // scrollIntoView, and the only caller runs synchronously inside the keydown
+    // handler, ahead of the change detection that would have to apply a
+    // conditional class. The top asks for nothing but that same outline kept
+    // off the scrollport's edge, since nothing in the shell is fixed or sticky
+    // above the grid.
+    class: 'scroll-mt-2 scroll-mb-28 reduce-transparency:opacity-100',
+    // The current-photo marker, and the dimming of every card that is not it.
+    // Both sit on the host rather than on the tile below, because the host's
+    // own `content-visibility: auto` brings paint containment with it, and that
+    // clips whatever a descendant draws outside the card's box -- the tile's
+    // focus-visible outline included. The host's own outline is the one that
+    // still reaches the 8px gutter, and the gutter is the only place a frame is
+    // not competing with the photograph for contrast: a line on the tile's edge
+    // loses to skin tones and blurred background, which is what the 2px
+    // selection ring already demonstrates. offset-2 plus 4px lands it entirely
+    // on the page background, 2px clear of the next card.
+    '[class.outline-4]': 'isActive()',
+    '[class.outline-[var(--mat-sys-tertiary)]]': 'isActive()',
+    '[class.outline-offset-2]': 'isActive()',
+    // Matches the tile's own rounding so the offset outline is concentric with
+    // it rather than cutting square corners past it.
+    '[class.rounded-lg]': 'isActive()',
+    // The hosts are flex/grid items, so this applies without positioning them.
+    // Well under the action bar (z-50) and the scroll-to-top button (z-40).
+    '[class.z-10]': 'isActive()',
+    // Users who set "reduce transparency" get the outline and aria-current
+    // above without this large-area translucency: the static
+    // reduce-transparency:opacity-100 class cancels it back to full opacity.
+    '[class.opacity-50]': 'isDimmed()',
+  },
   imports: [
     MatIconModule,
     MatButtonModule,
@@ -86,6 +140,7 @@ const DEFAULT_CLIPPING_BADGE_PERCENT = 5;
       [class.md:hover:ring-[var(--mat-sys-outline-variant)]]="!isSelected()"
       [attr.aria-label]="photo().keeper_hint?.has_better ? photo().filename + ', ' + ('culling.reason.better_shot' | translate) : photo().filename"
       [attr.aria-pressed]="isSelected()"
+      [attr.aria-current]="isActive() ? 'true' : null"
       (click)="onSelect($event)"
       (keydown.enter)="onKeyOpen($event)"
       (keydown.space)="onKeySelect($event)"
@@ -462,10 +517,31 @@ export class PhotoCardComponent {
 
   // Display state
   readonly isSelected = input(false);
+  /** Whether this card is the one the grid's keyboard cursor is standing on.
+   *
+   *  Independent of `isSelected`: a card can be both, and the two say different
+   *  things -- selection is a set the batch actions operate on, current is the
+   *  single photo the next rating keystroke lands on. */
+  readonly isActive = input(false);
+  /** Whether the grid this card sits in has a current photo at all.
+   *
+   *  Stated as a fact about the grid rather than passed as "dim yourself": a
+   *  card cannot see whether some *other* card is the current one. It stays
+   *  false until the grid's cursor first lands somewhere, which is what keeps
+   *  a gallery nobody has navigated yet from rendering every tile faded. */
+  readonly gridHasActiveCard = input(false);
   readonly hideDetails = input(false);
   readonly mosaicMode = input(false);
   readonly currentSort = input('aggregate');
   readonly thumbSize = input(240);
+
+  /** Every card except the current one, and only once there is a current one.
+   *
+   *  Fading the rest is the half of the marker that a photograph cannot defeat:
+   *  a line drawn at the tile's own edge competes with whatever the photo puts
+   *  there, whereas a grid where one tile alone is at full strength reads from
+   *  across the room. */
+  protected readonly isDimmed = computed(() => this.gridHasActiveCard() && !this.isActive());
 
   // Edition mode
   readonly isEditionMode = input(false);
